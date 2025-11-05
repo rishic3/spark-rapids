@@ -121,6 +121,8 @@ class PrioritySemaphore[T](val maxPermits: Long, val maxConcurrentGpuTasksLimit:
     try {
       occupiedSlots -= numPermits
       currentConcurrentGpuTasksNum -= 1
+      // Record the updated concurrent task count on release to capture decreases as well
+      GpuTaskMetrics.get.recordConcurrentGpuTasks(currentConcurrentGpuTasksNum)
       // acquire and wakeup for all threads that now have enough permits
       var done = false
       while (!done && waitingQueue.size() > 0) {

@@ -207,7 +207,7 @@ class AvgLongAccumulator extends AccumulatorV2[jl.Long, jl.Double] {
   } else 0;
 }
 
-class GpuTaskMetrics extends Serializable {
+class GpuTaskMetrics extends Serializable with Logging {
   private val semaphoreHoldingTime = new NanoSecondAccumulator
   private val semWaitTimeNs = new NanoSecondAccumulator
   private val retryCount = new LongAccumulator
@@ -250,6 +250,7 @@ class GpuTaskMetrics extends Serializable {
   def getDiskBytesAllocated: Long = GpuTaskMetrics.diskBytesAllocated.get()
 
   def getMaxDiskBytesAllocated: Long = maxDiskBytesAllocated
+
 
   def getHostBytesAllocated: Long = GpuTaskMetrics.hostBytesAllocated.get()
 
@@ -434,6 +435,11 @@ class GpuTaskMetrics extends Serializable {
 
   def recordConcurrentGpuTasks(currentConcurrentTasks: Long): Unit = {
     maxConcurrentGpuTasks.add(currentConcurrentTasks)
+    val tc = TaskContext.get()
+    val stageId = if (tc != null) tc.stageId() else -1
+    val taskAttemptId = if (tc != null) tc.taskAttemptId() else -1L
+    logInfo(s"gpuMaxConcurrentGpuTasks updated to ${currentConcurrentTasks} " +
+      s"(stage=${stageId}, taskAttemptId=${taskAttemptId})")
   }
 
   def updateMultithreadReaderMaxParallelism(parallelism: Long): Unit = {
