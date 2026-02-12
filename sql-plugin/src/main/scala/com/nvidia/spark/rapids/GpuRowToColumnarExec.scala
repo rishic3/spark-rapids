@@ -602,10 +602,18 @@ class RowToColumnarIterator(
   private var totalOutputBytes: Long = 0
   private var totalOutputRows: Long = 0
 
-  override def hasNext: Boolean = rowIter.hasNext
+  override def hasNext: Boolean = {
+    val start = System.nanoTime()
+    val result = rowIter.hasNext
+    streamTime += System.nanoTime() - start
+    result
+  }
 
   override def next(): ColumnarBatch = {
-    if (!rowIter.hasNext) {
+    val start = System.nanoTime()
+    val hasData = rowIter.hasNext
+    streamTime += System.nanoTime() - start
+    if (!hasData) {
       throw new NoSuchElementException
     }
     buildBatch()
