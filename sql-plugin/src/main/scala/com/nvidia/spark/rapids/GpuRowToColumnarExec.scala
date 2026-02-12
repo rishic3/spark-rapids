@@ -610,10 +610,7 @@ class RowToColumnarIterator(
   }
 
   override def next(): ColumnarBatch = {
-    val start = System.nanoTime()
-    val hasData = rowIter.hasNext
-    streamTime += System.nanoTime() - start
-    if (!hasData) {
+    if (!hasNext) {
       throw new NoSuchElementException
     }
     buildBatch()
