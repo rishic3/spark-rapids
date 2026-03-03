@@ -45,14 +45,13 @@ Current thread 0x0000712f6d865780 (most recent call first):
 Extension modules: numpy.core._multiarray_umath, (I TRUNCATED THIS)... (total: 298)
 ```
 
-The root cause is still not clear to me from the log. This is what Gemini thinks:
-```
-1. nsys Initializes Background Threads: When the PySpark Python daemon process starts, the inherited LD_PRELOAD forces nsys to load and spin up its internal C++ background threads for tracing and NVTX state management.
-2. PySpark uses fork() without exec(): To create workers rapidly, the PySpark daemon uses os.fork(). In Linux, a multi-threaded fork() only copies the calling thread into the child process; all background threads (including nsys's trace threads) are immediately killed.
-3. Corrupted Profiler State: The new Python worker process now holds a "zombified," corrupted copy of nsys's internal C++ memory state and locks.
-4. cuDF Triggers the Crash: Inside the UDF, the worker imports cuDF. cuDF is heavily instrumented and immediately calls nvtx.get_domain() to register its tracing domains.
-5. The Segfault: Because nsys is still hooked via LD_PRELOAD, it intercepts the nvtxDomainCreate C-API call. When it tries to access its corrupted internal state (or a dead mutex) to register the domain, it triggers a Segmentation Fault (SIGSEGV).
-```
+Gemini's root cause analysis:
+1. `nsys` initializes background threads when the PySpark Python daemon process starts. The inherited `LD_PRELOAD` causes nsys to spin up its internal C++ background threads for tracing and NVTX state management. (E.g., `NSys` / `NSys Comms`).
+2. PySpark uses `fork()` without `exec()`: to create workers rapidly, the PySpark daemon uses `os.fork()`. In Linux, a multi-threaded `fork()` only copies the calling thread into the child process; all background threads (including nsys's trace threads) are immediately killed.
+3. As a result of killing the extra `nsys` threads, the profiler state is corrupted somehow.
+4. Inside the UDF, the worker imports cuDF. cuDF has NVTX ranges around all kernels and immediately calls `nvtx.get_domain()` to register its tracing domains.
+5. `nsys` is still hooked via `LD_PRELOAD`; it intercepts `nvtxDomainCreate` but due to its corrupted state, this triggers a segfault.
+
 
 ## Fix
 
