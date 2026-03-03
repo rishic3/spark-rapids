@@ -47,7 +47,7 @@ Extension modules: numpy.core._multiarray_umath, (I TRUNCATED THIS)... (total: 2
 
 Gemini's root cause analysis:
 1. `nsys` initializes background threads when the PySpark Python daemon process starts. The inherited `LD_PRELOAD` causes nsys to spin up its internal C++ background threads for tracing and NVTX state management. (E.g., `NSys` / `NSys Comms`).
-2. PySpark uses `fork()` without `exec()`: to create workers rapidly, the PySpark daemon uses `os.fork()`. In Linux, a multi-threaded `fork()` only copies the calling thread into the child process; all background threads (including nsys's trace threads) are immediately killed.
+2. PySpark uses `fork()` without `exec()`: to create workers rapidly, the PySpark daemon uses `os.fork()`. In Linux, a multi-threaded `fork()` only copies the calling thread into the child process; any background threads (including nsys's trace threads) are not inherited.
 3. As a result of killing the extra `nsys` threads, the profiler state is corrupted somehow.
 4. Inside the UDF, the worker imports cuDF. cuDF has NVTX ranges around all kernels and immediately calls `nvtx.get_domain()` to register its tracing domains.
 5. `nsys` is still hooked via `LD_PRELOAD`; it intercepts `nvtxDomainCreate` but due to its corrupted state, this triggers a segfault.
