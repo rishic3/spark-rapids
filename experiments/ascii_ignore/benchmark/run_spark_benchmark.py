@@ -33,7 +33,7 @@ HOSTNAME = socket.gethostname()
 
 sys.path.insert(0, str(SRC_DIR))
 
-from ascii_ignore import ascii_ignore  # type: ignore[import-not-found]
+from ascii_ignore import ascii_ignore_pandas  # type: ignore[import-not-found]
 from ascii_ignore_gpu import ascii_ignore_gpu, make_timed_ascii_ignore_gpu  # type: ignore[import-not-found]
 
 
@@ -140,8 +140,8 @@ def run_single_benchmark(
     extra_spark_configs: Dict[str, str],
 ) -> float:
     if mode == "cpu":
-        udf_name = "ascii_ignore"
-        udf_func: Callable = ascii_ignore
+        udf_name = "ascii_ignore_pandas"
+        udf_func = ascii_ignore_pandas
     else:
         udf_name = "ascii_ignore_gpu"
         udf_func = ascii_ignore_gpu
@@ -157,6 +157,7 @@ def run_single_benchmark(
         spark_configs=spark_configs,
         extra_py_files=list(SRC_DIR.glob("*.py")),
     )
+    print(f"Spark master: {spark.conf.get('spark.master')}")
     output_path = str(SCRIPT_DIR / f"_tmp_{udf_name}_output")
 
     timing_acc = None
@@ -237,7 +238,7 @@ def main() -> None:
         rapids_jar_path=str(jar_file),
         extra_spark_configs=extra_spark_configs,
     )
-    udf_name = "ascii_ignore" if args.mode == "cpu" else "ascii_ignore_gpu"
+    udf_name = "ascii_ignore_pandas" if args.mode == "cpu" else "ascii_ignore_gpu"
     print(f"E2E runtime ({args.mode}/{udf_name}): {runtime:.2f}s")
 
 

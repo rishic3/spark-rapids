@@ -116,11 +116,11 @@ def _validate_args(args: argparse.Namespace) -> Path:
 
 
 def _format_runtime_line(mode: str, rows: int, times: List[float]) -> str:
-    median_ms = times[len(times) // 2] * 1000.0
-    min_ms = times[0] * 1000.0
+    median_s = times[len(times) // 2]
+    min_s = times[0]
     return (
         f"   {mode.upper():<4} | {rows:>14,d} rows | "
-        f"median {median_ms:>10.1f} ms | min {min_ms:>10.1f} ms"
+        f"median {median_s:>10.4f} s | min {min_s:>10.4f} s"
     )
 
 
