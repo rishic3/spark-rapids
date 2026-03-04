@@ -4,3 +4,4 @@ event_logs/
 nsys/
 results/
 *.txt
+*.csv

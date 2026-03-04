@@ -38,8 +38,8 @@ def main() -> None:
     args = parser.parse_args()
 
     read_ns, write_ns = extract_times(args.csv_path)
-    print(f"read python batch (s):  {read_ns / 1e9:.2f}")
     print(f"write python batch (s): {write_ns / 1e9:.2f}")
+    print(f"read python batch (s):  {read_ns / 1e9:.2f}")
 
 
 if __name__ == "__main__":
