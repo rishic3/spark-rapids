@@ -33,7 +33,7 @@ HOSTNAME = socket.gethostname()
 
 sys.path.insert(0, str(SRC_DIR))
 
-from ascii_ignore import ascii_ignore_pandas  # type: ignore[import-not-found]
+from ascii_ignore import ascii_ignore_pandas, make_timed_ascii_ignore_pandas  # type: ignore[import-not-found]
 from ascii_ignore_gpu import ascii_ignore_gpu, make_timed_ascii_ignore_gpu  # type: ignore[import-not-found]
 
 
@@ -50,6 +50,7 @@ BASE_SPARK_CONFIGS: Dict[str, str] = {
     "spark.eventLog.dir": "event_logs",
     "spark.eventLog.enabled": "true",
     "spark.python.worker.reuse": "true",
+    "spark.sql.execution.arrow.maxRecordsPerBatch": "10000",
     # "spark.rapids.sql.python.gpu.enabled": "true",
     # "spark.rapids.python.memory.gpu.pooling.enabled": "false",
 }
@@ -120,7 +121,7 @@ def register_udf(spark: SparkSession, udf_name: str, udf_func: Callable) -> None
         spark.udf.register(udf_name, udf_func, StringType())
 
 
-_TIMING_ZERO = {
+_GPU_TIMING_ZERO = {
     "cold_init_plus_first_h2d_s": 0.0,
     "warm_h2d_s": 0.0,
     "warm_d2h_s": 0.0,
@@ -128,6 +129,12 @@ _TIMING_ZERO = {
     "total_compute_s": 0.0,
     "batches": 0,
     "cold_batches": 0,
+    "rows": 0,
+}
+
+_CPU_TIMING_ZERO = {
+    "total_compute_s": 0.0,
+    "batches": 0,
     "rows": 0,
 }
 
@@ -158,12 +165,19 @@ def run_single_benchmark(
         extra_py_files=list(SRC_DIR.glob("*.py")),
     )
     print(f"Spark master: {spark.conf.get('spark.master')}")
+    print(f"Spark Arrow maxRecordsPerBatch: {spark.conf.get('spark.sql.execution.arrow.maxRecordsPerBatch')}")
     output_path = str(SCRIPT_DIR / f"_tmp_{udf_name}_output")
 
     timing_acc = None
-    if mode == "gpu":
+    if mode == "cpu":
         timing_acc = spark.sparkContext.accumulator(
-            dict(_TIMING_ZERO), _DictAccumulatorParam()
+            dict(_CPU_TIMING_ZERO), _DictAccumulatorParam()
+        )
+        udf_func = make_timed_ascii_ignore_pandas(timing_acc)
+        udf_name = "ascii_ignore_pandas"
+    elif mode == "gpu":
+        timing_acc = spark.sparkContext.accumulator(
+            dict(_GPU_TIMING_ZERO), _DictAccumulatorParam()
         )
         udf_func = make_timed_ascii_ignore_gpu(timing_acc)
         udf_name = "ascii_ignore_gpu"
@@ -180,7 +194,17 @@ def run_single_benchmark(
         elapsed = time.time() - start
     finally:
         shutil.rmtree(output_path, ignore_errors=True)
-        if timing_acc is not None:
+        if timing_acc is not None and mode == "cpu":
+            t = timing_acc.value
+            print("[UDF_TIMING]")
+            print(f"  {'batches:':38s} {t['batches']:10d}")
+            print(f"  {'rows:':38s} {t['rows']:10d}")
+            print(f"  {'total compute:':38s} {t['total_compute_s']:10.4f}s")
+            per_batch_s = t["total_compute_s"] / t["batches"] if t["batches"] > 0 else 0.0
+            per_row_us = (t["total_compute_s"] * 1e6 / t["rows"]) if t["rows"] > 0 else 0.0
+            print(f"  {'compute per batch:':38s} {per_batch_s:10.6f}s")
+            print(f"  {'compute per row:':38s} {per_row_us:10.3f}us")
+        elif timing_acc is not None and mode == "gpu":
             t = timing_acc.value
             warm_batches = t["batches"] - t["cold_batches"]
             warm_h2d_per_batch = (
@@ -194,19 +218,21 @@ def run_single_benchmark(
             print(f"  {'cold_batches:':38s} {t['cold_batches']:10d}")
             print(f"  {'warm_batches:':38s} {warm_batches:10d}")
             print(f"  {'rows:':38s} {t['rows']:10d}")
+            print(f"  {'--------------------------------':38s}")
+            print(f"  {'total compute (cold+warm):':38s} {t['total_compute_s']:10.4f}s")
+            print(f"  {'total D2H (cold+warm):':38s} {t['total_d2h_s']:10.4f}s")
+            print(f"  {'estimated total H2D:':38s} {est_total_h2d:10.4f}s")
+            print(f"  {'--------------------------------':38s}")
+            print(f"  {'warm total H2D:':38s} {t['warm_h2d_s']:10.4f}s ({warm_batches} batches)")
+            # print(f"  {'warm total D2H:':38s} {t['warm_d2h_s']:10.4f}s ({warm_batches} batches)")
+            print(f"  {'warm H2D per batch:':38s} {warm_h2d_per_batch:10.6f}s")
             print(
                 f"  {'cold init + first H2D:':38s} "
                 f"{t['cold_init_plus_first_h2d_s']:10.4f}s "
                 f"(across {t['cold_batches']} workers)"
             )
-            print(f"  {'warm total H2D:':38s} {t['warm_h2d_s']:10.4f}s ({warm_batches} batches)")
-            print(f"  {'warm total D2H:':38s} {t['warm_d2h_s']:10.4f}s ({warm_batches} batches)")
-            print(f"  {'total compute (cold+warm):':38s} {t['total_compute_s']:10.4f}s")
-            print(f"  {'warm H2D per batch:':38s} {warm_h2d_per_batch:10.6f}s")
             print(f"  {'estimated cold H2D:':38s} {est_cold_h2d:10.4f}s")
             print(f"  {'estimated pure cold init:':38s} {est_pure_cold_init:10.4f}s")
-            print(f"  {'estimated total H2D:':38s} {est_total_h2d:10.4f}s")
-            print(f"  {'total D2H (cold+warm):':38s} {t['total_d2h_s']:10.4f}s")
         spark.stop()
 
     return elapsed
@@ -239,7 +265,7 @@ def main() -> None:
         extra_spark_configs=extra_spark_configs,
     )
     udf_name = "ascii_ignore_pandas" if args.mode == "cpu" else "ascii_ignore_gpu"
-    print(f"E2E runtime ({args.mode}/{udf_name}): {runtime:.2f}s")
+    print(f"E2E runtime (s) ({args.mode}/{udf_name}): {runtime:.2f}")
 
 
 if __name__ == "__main__":
