@@ -213,7 +213,7 @@ def run_single_benchmark(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark ascii_ignore")
-    parser.add_argument("--mode", choices=["cpu", "gpu"], required=True)
+    parser.add_argument("mode", choices=["cpu", "gpu"], help="Mode to run: cpu or gpu")
     parser.add_argument("--cluster", choices=["standalone", "local"], default="standalone",
                         help="Cluster mode: 'standalone' (default) or 'local'")
     parser.add_argument("--data-path", required=True, help="Input parquet data path")

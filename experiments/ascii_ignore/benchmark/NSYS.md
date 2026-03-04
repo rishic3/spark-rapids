@@ -74,7 +74,7 @@ exec "${PYTHON_BIN}" "$@"
 ```bash
 nsys profile --sample=none --trace=nvtx,cuda --trace-fork-before-exec=false \
   --output nsys/local_$(date +%Y%m%d-%H%M%S) \
-  python run_benchmark.py --mode gpu --cluster local \
+  python run_benchmark.py gpu --cluster local \
   --data-path data/bench_data_1M_rows.parquet \
   --rapids-jar-path ~/.cache/cuaether-assistant/jars/rapids-4-spark_2.12-25.12.0.jar \
   --spark-conf "spark.pyspark.python=$(pwd)/unprofiled_python.sh"
@@ -86,7 +86,7 @@ nsys profile --sample=none --trace=nvtx,cuda --trace-fork-before-exec=false \
 2. Run benchmark in a separate terminal:
 
 ```bash
-python run_benchmark.py --mode gpu --cluster standalone \
+python run_benchmark.py gpu --cluster standalone \
   --data-path data/bench_data_1M_rows.parquet \
   --rapids-jar-path ~/.cache/cuaether-assistant/jars/rapids-4-spark_2.12-25.12.0.jar \
   --spark-conf "spark.pyspark.python=$(pwd)/unprofiled_python.sh"
@@ -100,7 +100,7 @@ python run_benchmark.py --mode gpu --cluster standalone \
 
 ```bash
 nsys profile --trace nvtx,cuda \
-  python run_benchmark.py --mode gpu --cluster local \
+  python run_benchmark.py gpu --cluster local \
   --data-path data/bench_data_1M_rows.parquet \
   --rapids-jar-path ~/.cache/cuaether-assistant/jars/rapids-4-spark_2.12-25.12.0.jar \
   --spark-conf "spark.pyspark.python=$(pwd)/debug_python_worker.sh" \
