@@ -65,9 +65,17 @@ unset LD_PRELOAD
 unset QUADD_ENABLE_PROFILER
 unset CUDA_INJECTION64_PATH
 
-PYTHON_BIN="${PYSPARK_UNPROFILED_PYTHON_BIN:-/path/to/python}"
+# Optional: disable Python NVTX emission from the worker process.
+case "${PYWORKER_DISABLE_NVTX:-0}" in
+  1|true|TRUE|True|yes|YES|Yes)
+    export NVTX_DISABLE=1
+    ;;
+esac
+
+PYTHON_BIN="${PYSPARK_UNPROFILED_PYTHON_BIN:-${PYSPARK_DRIVER_PYTHON:-/home/rishic/anaconda3/envs/spark-rapids/bin/python}}"
 exec "${PYTHON_BIN}" "$@"
 ```
+`nsys` will still capture ranges emitted by cuDF Python if `PYWORKER_DISABLE_NVTX` is enabled. By default, this just strips library injection.  
 
 ## Local
 

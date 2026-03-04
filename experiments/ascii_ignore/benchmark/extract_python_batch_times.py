@@ -13,22 +13,49 @@ def _parse_ns(raw: str) -> int:
     return int(float(cleaned))
 
 
-def extract_times(csv_path: Path) -> tuple[int, int]:
-    read_total_ns = 0
-    write_total_ns = 0
+def _parse_count(raw: str) -> int:
+    cleaned = raw.strip().replace(",", "")
+    if not cleaned:
+        return 0
+    return int(float(cleaned))
+
+
+def extract_times(csv_path: Path) -> dict[str, int]:
+    metrics = {
+        "read_python_batch_total_ns": 0,
+        "read_python_batch_instances": 0,
+        "write_python_batch_total_ns": 0,
+        "write_python_batch_instances": 0,
+        "to_arrow_host_total_ns": 0,
+        "to_arrow_host_instances": 0,
+        "from_arrow_total_ns": 0,
+        "from_arrow_instances": 0,
+    }
 
     with csv_path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
             range_name = row.get("Range", "").strip().lower()
+            normalized_range = range_name.replace("::", ":")
             total_time_ns = _parse_ns(row.get("Total Time (ns)", "0"))
+            instances = _parse_count(row.get("Instances", "0"))
 
             if range_name.endswith("read python batch"):
-                read_total_ns += total_time_ns
+                metrics["read_python_batch_total_ns"] += total_time_ns
+                metrics["read_python_batch_instances"] += instances
             elif range_name.endswith("write python batch"):
-                write_total_ns += total_time_ns
+                metrics["write_python_batch_total_ns"] += total_time_ns
+                metrics["write_python_batch_instances"] += instances
 
-    return read_total_ns, write_total_ns
+            if normalized_range.endswith("to_arrow_host"):
+                metrics["to_arrow_host_total_ns"] += total_time_ns
+                metrics["to_arrow_host_instances"] += instances
+
+            if normalized_range.endswith("libcudf:from_arrow"):
+                metrics["from_arrow_total_ns"] += total_time_ns
+                metrics["from_arrow_instances"] += instances
+
+    return metrics
 
 
 def generate_nvtx_sum_csv(nsys_rep_path: Path, output_path: Path) -> Path:
@@ -96,9 +123,18 @@ def main() -> None:
             "input_path must be either a .csv file or an .nsys-rep file"
         )
 
-    read_ns, write_ns = extract_times(csv_path)
-    print(f"write python batch (s): {write_ns / 1e9:.6f}")
-    print(f"read python batch (s):  {read_ns / 1e9:.6f}")
+    metrics = extract_times(csv_path)
+    print(f"write python batch (s): {metrics['write_python_batch_total_ns'] / 1e9:.6f}")
+    print(f"write python batch instances: {metrics['write_python_batch_instances']}")
+    print()
+    print(f"read python batch (s):  {metrics['read_python_batch_total_ns'] / 1e9:.6f}")
+    print(f"read python batch instances:  {metrics['read_python_batch_instances']}")
+    print()
+    print(f"to_arrow_host (s):      {metrics['to_arrow_host_total_ns'] / 1e9:.6f}")
+    print(f"to_arrow_host instances:      {metrics['to_arrow_host_instances']}")
+    print()
+    print(f"libcudf::from_arrow (s): {metrics['from_arrow_total_ns'] / 1e9:.6f}")
+    print(f"libcudf::from_arrow instances: {metrics['from_arrow_instances']}")
 
 
 if __name__ == "__main__":

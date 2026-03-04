@@ -30,6 +30,7 @@ def _run_benchmark(warmup: int, measured: int, block: Callable[[], object]) -> L
         result = block()
         elapsed = time.perf_counter() - start
         del result
+        print(f"elapsed: {elapsed:.6f} s")
         times.append(elapsed)
     times.sort()
     return times

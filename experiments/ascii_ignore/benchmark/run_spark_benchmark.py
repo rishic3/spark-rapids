@@ -145,6 +145,7 @@ def run_single_benchmark(
     data_path: str,
     rapids_jar_path: str,
     extra_spark_configs: Dict[str, str],
+    coalesce: Optional[int] = None,
 ) -> float:
     if mode == "cpu":
         udf_name = "ascii_ignore_pandas"
@@ -186,6 +187,8 @@ def run_single_benchmark(
         register_udf(spark, udf_name, udf_func)
         start = time.time()
         df = spark.read.parquet(data_path)
+        if coalesce is not None:
+            df = df.coalesce(coalesce)
         df.createOrReplaceTempView("bench_table")
         result_df = spark.sql(
             f"SELECT *, {udf_name}(input_str) as result FROM bench_table"
@@ -246,6 +249,7 @@ def main() -> None:
     parser.add_argument("--data-path", required=True, help="Input parquet data path")
     parser.add_argument("--rapids-jar-path", required=True, help="Path to RAPIDS plugin jar")
     parser.add_argument("--spark-conf", action="append", default=[], help="Spark configs in key=value format")
+    parser.add_argument("--coalesce", type=int, default=None, help="Number of partitions to coalesce to")
     args = parser.parse_args()
 
     data_file = Path(args.data_path).resolve()
@@ -263,6 +267,7 @@ def main() -> None:
         data_path=str(data_file),
         rapids_jar_path=str(jar_file),
         extra_spark_configs=extra_spark_configs,
+        coalesce=args.coalesce,
     )
     udf_name = "ascii_ignore_pandas" if args.mode == "cpu" else "ascii_ignore_gpu"
     print(f"E2E runtime (s) ({args.mode}/{udf_name}): {runtime:.2f}")
