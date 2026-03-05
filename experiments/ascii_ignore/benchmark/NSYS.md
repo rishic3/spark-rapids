@@ -75,7 +75,8 @@ esac
 PYTHON_BIN="${PYSPARK_UNPROFILED_PYTHON_BIN:-${PYSPARK_DRIVER_PYTHON:-/home/rishic/anaconda3/envs/spark-rapids/bin/python}}"
 exec "${PYTHON_BIN}" "$@"
 ```
-`nsys` will still capture ranges emitted by cuDF Python if `PYWORKER_DISABLE_NVTX` is enabled. By default, this just strips library injection.  
+`nsys` will still capture ranges emitted by cuDF Python. By default, this just strips library injection.  
+If `PYWORKER_DISABLE_NVTX` is enabled then cuDF Python ranges will be omitted; however, this will still capture libcudf ranges that are invoked by cuDF python. 
 
 ## Local
 
