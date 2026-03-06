@@ -1,8 +1,6 @@
 import re
 import pandas as pd
 
-STRIP_CHARS = re.compile(r"""[?()\-%=:&*"'><\\}{$@+/\]\[;~#,]""")
-
 def ascii_ignore_impl(x):
     if x:
       return x.encode('ascii', 'ignore').decode('ascii').strip().replace('?', '').replace(')', '') \
@@ -14,6 +12,8 @@ def ascii_ignore_impl(x):
     else:
         return None
 
+
+STRIP_CHARS = re.compile(r"""[?()\-%=:&*"'><\\}{$@+/\]\[;~#,]""")
 
 def ascii_ignore_pandas_impl(s: pd.Series) -> pd.Series:
     return (
