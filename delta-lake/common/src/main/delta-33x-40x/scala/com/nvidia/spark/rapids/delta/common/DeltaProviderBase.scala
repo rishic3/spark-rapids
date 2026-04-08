@@ -30,6 +30,7 @@ import org.apache.spark.sql.delta.DeltaParquetFileFormat.IS_ROW_DELETED_COLUMN_N
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.metric.IncrementMetric
 import org.apache.spark.sql.delta.rapids.DeltaRuntimeShim
+import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.datasources.{FileFormat, HadoopFsRelation, SaveIntoDataSourceCommand}
 import org.apache.spark.sql.execution.datasources.v2.{AtomicCreateTableAsSelectExec, AtomicReplaceTableAsSelectExec}
@@ -100,12 +101,13 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
     }
   }
 
-  override def getReadFileFormat(relation: HadoopFsRelation): FileFormat = {
+  override def getReadFileFormat(
+      relation: HadoopFsRelation, rapidsConf: RapidsConf): FileFormat = {
     val fmt = relation.fileFormat.asInstanceOf[DeltaParquetFileFormat]
-    toGpuParquetFileFormat(fmt)
+    toGpuParquetFileFormat(rapidsConf, fmt)
   }
 
-  protected def toGpuParquetFileFormat(fmt: DeltaParquetFileFormat): FileFormat
+  protected def toGpuParquetFileFormat(conf: RapidsConf, fmt: DeltaParquetFileFormat): FileFormat
 
   override def convertToGpu(
     cpuExec: AtomicCreateTableAsSelectExec,
@@ -134,6 +136,13 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
       cpuExec.writeOptions,
       cpuExec.orCreate,
       InvalidateCacheShims.getInvalidateCache(cpuExec.invalidateCache))
+  }
+
+  override def canPushDVPredicateDownToScan(conf: RapidsConf): Boolean = {
+    val dvConf = DeltaSQLConf.DELETION_VECTORS_USE_METADATA_ROW_INDEX
+    val useMetadataRowIndex = conf.getStr(dvConf.key)
+      .getOrElse(dvConf.defaultValueString).toBoolean
+    useMetadataRowIndex && conf.isDeltaDeletionVectorPredicatePushdownEnabled
   }
 
   override def pushDVPredicateDownToScan(plan: SparkPlan): SparkPlan = {
@@ -173,7 +182,8 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
       dvFilter @ GpuFilterExec(condition,
       dvFilterInput @ GpuProjectExec(inputList, fsse: GpuFileSourceScanExec, _)), _)
         if condition.references.exists(_.name == IS_ROW_DELETED_COLUMN_NAME) &&
-          !outputList.exists(_.name == "_metadata") && inputList.exists(_.name == "_metadata") =>
+          !outputList.flatMap(_.references).exists(_.name == "_metadata") &&
+          inputList.exists(_.name == "_metadata") =>
         dvRoot.withNewChildren(Seq(
           dvFilter.withNewChildren(Seq(
             dvFilterInput.copy(projectList = inputList.filterNot(_.name == "_metadata"))
@@ -198,7 +208,8 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
     maybeDVScan.map {
       case ProjectExec(outputList, FilterExec(condition, ProjectExec(inputList, _))) =>
         condition.references.exists(_.name == IS_ROW_DELETED_COLUMN_NAME) &&
-          inputList.exists(_.name == "_metadata") && !outputList.exists(_.name == "_metadata")
+          inputList.exists(_.name == "_metadata") &&
+          !outputList.flatMap(_.references).exists(_.name == "_metadata")
       case _ =>
         false
     }.getOrElse(false)

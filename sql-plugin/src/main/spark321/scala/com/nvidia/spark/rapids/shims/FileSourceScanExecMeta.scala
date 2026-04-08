@@ -34,6 +34,7 @@
 {"spark": "355"}
 {"spark": "356"}
 {"spark": "357"}
+{"spark": "358"}
 {"spark": "400"}
 {"spark": "401"}
 {"spark": "402"}
@@ -100,7 +101,7 @@ class FileSourceScanExecMeta(plan: FileSourceScanExec,
       wrapped.relation.partitionSchema,
       wrapped.relation.dataSchema,
       wrapped.relation.bucketSpec,
-      GpuFileSourceScanExec.convertFileFormat(wrapped.relation),
+      GpuFileSourceScanExec.convertFileFormat(wrapped.relation, conf),
       options)(sparkSession)
 
     GpuFileSourceScanExec(

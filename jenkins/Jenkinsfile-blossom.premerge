@@ -72,8 +72,7 @@ pipeline {
         LIBCUDF_KERNEL_CACHE_PATH = '/tmp/.cudf'
         GITHUB_TOKEN = credentials("github-token")
 
-        // v1 instance for maven mirror only, will be migrated to v2 soon
-        URM_URL = "https://${common.ARTIFACTORY_NAME}/artifactory/sw-spark-maven"
+        URM_URL = "https://${common.ARTIFACTORY_NAME_V2}/artifactory/sw-spark-maven"
         MVN_URM_MIRROR = '-s jenkins/settings.xml -P mirror-apache-to-urm'
         // v2 instance for CI images usage
         URM_CREDS = credentials("urm_creds_v2")
@@ -200,6 +199,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                             container('gpu') {
                                 timeout(time: 6, unit: 'HOURS') { // step only timeout for test run
                                     try {
+                                        common.resolveIncompatibleDriverIssue(this)
                                         common.pvcM2Cache(this, PVC_MOUNT_PATH)
                                         common.prepareArtNetrc(this)
                                         sh "$PREMERGE_SCRIPT mvn_verify"
@@ -241,6 +241,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                             container('gpu') {
                                 timeout(time: 6, unit: 'HOURS') {
                                     try {
+                                        common.resolveIncompatibleDriverIssue(this)
                                         common.pvcM2Cache(this, PVC_MOUNT_PATH)
                                         common.prepareArtNetrc(this)
                                         sh "$PREMERGE_SCRIPT ci_2"
@@ -276,6 +277,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                             container('gpu') {
                                 timeout(time: 6, unit: 'HOURS') {
                                     try {
+                                        common.resolveIncompatibleDriverIssue(this)
                                         common.pvcM2Cache(this, PVC_MOUNT_PATH)
                                         common.prepareArtNetrc(this)
                                         sh "$PREMERGE_SCRIPT ci_scala213"
@@ -432,7 +434,7 @@ void checkoutCode(String url, String sha) {
                                     credentialsId: 'github-token',
                                     url          : url,
                                     refspec      : '+refs/pull/*/merge:refs/remotes/origin/pr/*']],
-             extensions      : [[$class: 'CloneOption', shallow: true]]
+             extensions      : [[$class: 'CloneOption', shallow: true, depth: 10]]
         ]
     )
     sh "git submodule update --init"

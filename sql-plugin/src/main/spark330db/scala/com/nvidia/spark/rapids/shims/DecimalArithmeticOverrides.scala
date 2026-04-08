@@ -32,7 +32,9 @@
 {"spark": "355"}
 {"spark": "356"}
 {"spark": "357"}
+{"spark": "358"}
 {"spark": "400"}
+{"spark": "400db173"}
 {"spark": "401"}
 {"spark": "402"}
 {"spark": "411"}
@@ -89,7 +91,7 @@ object DecimalArithmeticOverrides {
                 GpuDecimalMultiply(lhs, rhs, d,
                   useLongMultiply = intermediatePrecision > DType.DECIMAL128_MAX_PRECISION)
               case _ =>
-                GpuMultiply(lhs, rhs)
+                GpuMultiply(lhs, rhs)(a.origin)
             }
           }
         }),
@@ -115,7 +117,7 @@ object DecimalArithmeticOverrides {
               case d: DecimalType =>
                 GpuDecimalDivide(lhs, rhs, d)
               case _ =>
-                GpuDivide(lhs, rhs)
+                GpuDivide(lhs, rhs)(a.origin)
             }
         }),
       expr[IntegralDivide](
@@ -129,7 +131,7 @@ object DecimalArithmeticOverrides {
             if (lhs.dataType.isInstanceOf[DecimalType] && rhs.dataType.isInstanceOf[DecimalType]) {
               GpuIntegralDecimalDivide(lhs, rhs)
             } else {
-              GpuIntegralDivide(lhs, rhs)
+              GpuIntegralDivide(lhs, rhs)(a.origin)
             }
         }),
 

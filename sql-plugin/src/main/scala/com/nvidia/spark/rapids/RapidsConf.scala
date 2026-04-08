@@ -438,6 +438,14 @@ object RapidsConf extends Logging {
       .integerConf
       .createWithDefault(2)
 
+  val ENABLE_R2C_RETRY = conf("spark.rapids.sql.rowToColumnar.retry.enabled")
+    .doc("When true (default), the row-to-columnar conversion uses a per-batch retry block " +
+      "so that host OOM during conversion can be recovered with negligible overhead. " +
+      "Set to false to disable retry and let host OOM fail the task immediately.")
+    .internal()
+    .booleanConf
+    .createWithDefault(true)
+
   val GPU_COREDUMP_DIR = conf("spark.rapids.gpu.coreDump.dir")
     .doc("The URI to a directory where a GPU core dump will be created if the GPU encounters " +
       "an exception. The URI can reference a distributed filesystem. The filename will be of the " +
@@ -724,15 +732,6 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .internal()
     .stringConf
     .createOptional
-
-  val TIMESTAMP_RULES_END_YEAR = conf("spark.rapids.timezone.transitionCache.maxYear")
-    .doc("Set the max year for timestamp processing for timezones with transitions " +
-      "such as Daylight Savings. For efficiency reasons, timestamp" +
-      " transitions are stored on the GPU. We store transitions up to some set year." +
-      " Adding more years will use more memory, every 100 years is roughly 1MB.")
-    .startupOnly()
-    .integerConf
-    .createWithDefault(2200)
 
   // Internal Features
 
@@ -2793,6 +2792,20 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .booleanConf
     .createWithDefault(false)
 
+    val DELTA_DELETION_VECTOR_PREDICATE_PUSHDOWN =
+    conf("spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled")
+      .doc("When true, the deletion vector processing will be pushed down to " +
+        "the GPU Delta Lake scans. The result of the scan will contain only the rows " +
+        "that are not deleted according to the deletion vector. When false, " +
+        "the deletion vectors will be materialized as a boolean column and " +
+        "the GPU filter operator will process it together with other filters. " +
+        "This setting is effective only when " +
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex is true. " +
+        "Otherwise, this setting is fixed to false regardless of its actual value.")
+      .internal()
+      .booleanConf
+      .createWithDefault(true)
+
   val ENABLE_HASH_FUNCTION_IN_PARTITIONING =
     conf("spark.rapids.sql.partitioning.hashFunction.enabled")
       .doc("When false, Only Murmur3Hash is used for GPU hash partitioning to " +
@@ -3035,7 +3048,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         |On startup use: `--conf [conf key]=[conf value]`. For example:
         |
         |```
-        |${SPARK_HOME}/bin/spark-shell --jars rapids-4-spark_2.12-26.04.0-SNAPSHOT-cuda12.jar \
+        |${SPARK_HOME}/bin/spark-shell --jars rapids-4-spark_2.12-26.06.0-SNAPSHOT-cuda12.jar \
         |--conf spark.plugins=com.nvidia.spark.SQLPlugin \
         |--conf spark.rapids.sql.concurrentGpuTasks=2
         |```
@@ -3339,6 +3352,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val gpuOomDumpDir: Option[String] = get(GPU_OOM_DUMP_DIR)
 
   lazy val gpuOomMaxRetries: Int = get(GPU_OOM_MAX_RETRIES)
+
+  lazy val isR2cRetryEnabled: Boolean = get(ENABLE_R2C_RETRY)
 
   lazy val gpuCoreDumpDir: Option[String] = get(GPU_COREDUMP_DIR)
 
@@ -3865,8 +3880,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val driverTimeZone: Option[String] = get(DRIVER_TIMEZONE)
 
-  lazy val timestampRulesEndYear: Int = get(TIMESTAMP_RULES_END_YEAR)
-
   lazy val isRangeWindowByteEnabled: Boolean = get(ENABLE_RANGE_WINDOW_BYTES)
 
   lazy val isRangeWindowShortEnabled: Boolean = get(ENABLE_RANGE_WINDOW_SHORT)
@@ -3936,6 +3949,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val testGetJsonObjectSaveRows: Int = get(TEST_GET_JSON_OBJECT_SAVE_ROWS)
 
   lazy val isDeltaLowShuffleMergeEnabled: Boolean = get(ENABLE_DELTA_LOW_SHUFFLE_MERGE)
+
+  lazy val isDeltaDeletionVectorPredicatePushdownEnabled: Boolean =
+    get(DELTA_DELETION_VECTOR_PREDICATE_PUSHDOWN)
 
   lazy val isHashFuncPartitioningEnabled: Boolean = get(ENABLE_HASH_FUNCTION_IN_PARTITIONING)
 

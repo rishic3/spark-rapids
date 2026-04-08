@@ -204,6 +204,8 @@ def test_empty_broadcast_hash_join(join_type, kudo_enabled):
 
 @pytest.mark.parametrize('join_type', ['Left', 'Inner', 'LeftSemi', 'LeftAnti'], ids=idfn)
 @pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
+# https://github.com/NVIDIA/spark-rapids/issues/11100
+@allow_non_gpu('EmptyRelationExec')
 def test_broadcast_hash_join_constant_keys(join_type, kudo_enabled):
     def do_join(spark):
         left = spark.range(10).withColumn("s", lit(1))
@@ -500,7 +502,10 @@ def test_empty_cross_side_with_limit(std_input_path):
         t0 = spark.read.csv(std_input_path + '/t0.csv', header=True, inferSchema=True)
         t1 = spark.read.csv(std_input_path + '/t1.csv', header=True, inferSchema=True)
         return t0.crossJoin(t1).limit(21)
-    assert_gpu_and_cpu_are_equal_collect(do_join)
+    assert_gpu_and_cpu_are_equal_collect(
+        do_join,
+        # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+        conf={'spark.sql.adaptive.enabled': 'false'})
 
 @allow_non_gpu('CollectLimitExec')
 def test_empty_right_outer_side_with_limit(std_input_path):
@@ -769,7 +774,11 @@ def test_right_broadcast_nested_loop_join_condition_missing(data_gen, join_type,
         # Compute the distinct of the join result to verify the join produces a proper dataframe
         # for downstream processing.
         return left.join(broadcast(right), how=join_type).distinct()
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled})
+    assert_gpu_and_cpu_are_equal_collect(
+        do_join,
+        conf = {kudo_enabled_conf_key: kudo_enabled,
+                'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
+                })
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', all_gen, ids=idfn)
@@ -796,7 +805,10 @@ def test_right_broadcast_nested_loop_join_condition_missing_count(data_gen, join
     def do_join(spark):
         left, right = create_df(spark, data_gen, 50, 25)
         return left.join(broadcast(right), how=join_type).selectExpr('COUNT(*)')
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled})
+    # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled,
+                                                          'spark.sql.adaptive.enabled': 'false'
+                                                          })
 
 @pytest.mark.parametrize('data_gen', all_gen + single_level_array_gens + [binary_gen], ids=idfn)
 @pytest.mark.parametrize('join_type', ['Right'], ids=idfn)
@@ -915,7 +927,11 @@ def test_broadcast_join_with_condition_post_filter(data_gen, join_type, kudo_ena
         left, right = create_df(spark, data_gen, 500, 250)
         return left.join(broadcast(right),
                          (left.a == right.r_a) & (left.b > right.r_b), join_type)
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf = {kudo_enabled_conf_key: kudo_enabled})
+    assert_gpu_and_cpu_are_equal_collect(
+        do_join,
+        conf = {kudo_enabled_conf_key: kudo_enabled,
+                'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
+                })
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
@@ -1491,7 +1507,6 @@ def test_bloom_filter_join_cpu_probe(is_multi_column, kudo_enabled):
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
 @pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
-@pytest.mark.xfail(condition=is_spark_411_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/14148")
 @pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 def test_bloom_filter_join_cpu_build(is_multi_column, kudo_enabled):
     conf = {"spark.rapids.sql.expression.BloomFilterAggregate": "false",
@@ -1506,7 +1521,6 @@ def test_bloom_filter_join_cpu_build(is_multi_column, kudo_enabled):
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
 @pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
-@pytest.mark.xfail(condition=is_spark_411_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/14148")
 @pytest.mark.parametrize("kudo_enabled", ["true", "false"], ids=idfn)
 def test_bloom_filter_join_split_cpu_build(agg_replace_mode, is_multi_column, kudo_enabled):
     conf = {"spark.rapids.sql.hashAgg.replaceMode": agg_replace_mode,
@@ -1548,7 +1562,11 @@ def test_bloom_filter_join_with_merge_all_null_filters(spark_tmp_path, kudo_enab
         left = spark.read.parquet(data_path1)
         right = spark.read.parquet(data_path2)
         return right.filter("cast(id2 as bigint) % 3 = 4").join(left, left.id == right.id, "inner")
-    conf = copy_and_update(bloom_filter_confs, {kudo_enabled_conf_key: kudo_enabled})
+    conf = copy_and_update(
+        bloom_filter_confs,
+        {kudo_enabled_conf_key: kudo_enabled,
+         'spark.sql.adaptive.enabled': 'false'} # disable AQE as it can change the join type
+    )
     assert_gpu_and_cpu_are_equal_collect(do_join, conf)
 
 
@@ -1937,4 +1955,8 @@ def test_hash_join_struct_keys_different_field_names_fallback(join_type):
         return left_df.join(right_df, left_df.key == right_df.key, join_type)
 
     # The join should fall back to CPU due to different struct field names
-    assert_gpu_fallback_collect(do_join, 'BroadcastHashJoinExec')
+    assert_gpu_fallback_collect(
+        do_join,
+        'BroadcastHashJoinExec',
+        conf={'spark.sql.adaptive.enabled': 'false'}  # disable AQE as it can change the join type
+    )
