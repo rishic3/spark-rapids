@@ -3,6 +3,7 @@
 
 import argparse
 import gc
+import importlib
 import sys
 import time
 from pathlib import Path
@@ -11,12 +12,13 @@ from typing import Callable, Iterator, List, Sequence
 
 DEFAULT_WARMUP = 2
 DEFAULT_MEASURED = 4
-DEFAULT_COLUMN = "input_str"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
 SRC_DIR = PROJECT_DIR / "src"
 sys.path.insert(0, str(SRC_DIR))
+
+from udf_registry import available_names, get_config  # type: ignore[import-not-found]
 
 
 def _run_benchmark(warmup: int, measured: int, block: Callable[[], object]) -> List[float]:
@@ -36,12 +38,13 @@ def _run_benchmark(warmup: int, measured: int, block: Callable[[], object]) -> L
     return times
 
 
-def _build_batches(series, batch_size: int) -> Sequence:
+def _build_batches(data, batch_size: int) -> Sequence:
+    """Slice a Series *or* DataFrame into row batches."""
     if batch_size <= 0:
-        return (series,)
+        return (data,)
 
     return tuple(
-        series.iloc[start : start + batch_size] for start in range(0, len(series), batch_size)
+        data.iloc[start : start + batch_size] for start in range(0, len(data), batch_size)
     )
 
 
@@ -80,8 +83,13 @@ def _synchronize_gpu() -> None:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="In-memory benchmark for pure UDF execution time.")
     parser.add_argument("mode", choices=["cpu", "gpu", "all"], help="Execution mode")
+    parser.add_argument(
+        "--udf",
+        default="ascii_ignore",
+        choices=available_names(),
+        help="UDF to benchmark (default: ascii_ignore)",
+    )
     parser.add_argument("-d", "--data-path", required=True, help="Parquet data file or directory")
-    parser.add_argument("-c", "--column", default=DEFAULT_COLUMN, help="Input string column name")
     parser.add_argument(
         "-r",
         "--rows",
@@ -126,34 +134,52 @@ def _format_runtime_line(mode: str, rows: int, times: List[float]) -> str:
 
 
 def _run_single_mode(mode: str, args: argparse.Namespace, data_path: Path) -> List[float]:
+    cfg = get_config(args.udf)
+
     if mode == "cpu":
         import pandas as pd
-        from ascii_ignore_impl import ascii_ignore_pandas_impl  # type: ignore[import-not-found]
+
+        mod = importlib.import_module(f"{cfg.name}_impl")
+        impl_func = getattr(mod, f"{cfg.name}_pandas_impl")
 
         df = pd.read_parquet(data_path)
-        if args.column not in df.columns:
-            raise KeyError(f"Column '{args.column}' not found in dataset")
+        for col_name in cfg.input_columns:
+            if col_name not in df.columns:
+                raise KeyError(f"Column '{col_name}' not found in dataset")
         if args.rows > 0:
             df = df.head(args.rows)
-        input_series = df[args.column]
-        batches = _build_batches(input_series, args.batch_size)
-        rows = len(input_series)
+
+        if cfg.input_mode == "series":
+            input_data = df[cfg.input_columns[0]]
+        else:
+            input_data = df[cfg.input_columns]
+
+        batches = _build_batches(input_data, args.batch_size)
+        rows = len(input_data)
         mem_mb = float(df.memory_usage(index=True, deep=True).sum()) / (1024.0 * 1024.0)
-        run_once = _make_batched_runner(batches, ascii_ignore_pandas_impl)
+        run_once = _make_batched_runner(batches, impl_func)
     else:
-        import cudf
-        from ascii_ignore_gpu_impl import ascii_ignore_cudf_impl  # type: ignore[import-not-found]
+        import cudf  # type: ignore
+
+        mod = importlib.import_module(f"{cfg.name}_gpu_impl")
+        impl_func = getattr(mod, f"{cfg.name}_cudf_impl")
 
         df = cudf.read_parquet(data_path)
-        if args.column not in df.columns:
-            raise KeyError(f"Column '{args.column}' not found in dataset")
+        for col_name in cfg.input_columns:
+            if col_name not in df.columns:
+                raise KeyError(f"Column '{col_name}' not found in dataset")
         if args.rows > 0:
             df = df.head(args.rows)
-        input_series = df[args.column]
-        batches = _build_batches(input_series, args.batch_size)
-        rows = len(input_series)
+
+        if cfg.input_mode == "series":
+            input_data = df[cfg.input_columns[0]]
+        else:
+            input_data = df[cfg.input_columns]
+
+        batches = _build_batches(input_data, args.batch_size)
+        rows = len(input_data)
         mem_mb = float(df.memory_usage(deep=True).sum()) / (1024.0 * 1024.0)
-        run_once = _make_batched_runner(batches, ascii_ignore_cudf_impl)
+        run_once = _make_batched_runner(batches, impl_func)
 
     effective_batch_size = rows if args.batch_size <= 0 else args.batch_size
     num_batches = len(batches)
@@ -163,15 +189,15 @@ def _run_single_mode(mode: str, args: argparse.Namespace, data_path: Path) -> Li
         f"({mem_mb:.1f} MB) from: {data_path}"
     )
     print(
-        f"Microbenchmark (in-memory): mode={mode}, "
-        f"warmup={args.warmup}, measured={args.measured}, column={args.column}, "
+        f"Microbenchmark (in-memory): udf={args.udf}, mode={mode}, "
+        f"warmup={args.warmup}, measured={args.measured}, "
         f"batch_size={effective_batch_size}, batches={num_batches}"
     )
 
     times = _run_benchmark(warmup=args.warmup, measured=args.measured, block=run_once)
     if mode == "gpu":
         _synchronize_gpu()
-        del run_once, batches, input_series, df
+        del run_once, batches, input_data, df
         gc.collect()
         _synchronize_gpu()
     print(_format_runtime_line(mode, rows, times))

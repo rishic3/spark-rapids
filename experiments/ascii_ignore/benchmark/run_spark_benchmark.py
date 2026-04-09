@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import importlib
 import os
 import shutil
 import socket
@@ -33,8 +34,7 @@ HOSTNAME = socket.gethostname()
 
 sys.path.insert(0, str(SRC_DIR))
 
-from ascii_ignore import ascii_ignore_pandas, make_timed_ascii_ignore_pandas  # type: ignore[import-not-found]
-from ascii_ignore_gpu import ascii_ignore_gpu, make_timed_ascii_ignore_gpu  # type: ignore[import-not-found]
+from udf_registry import available_names, get_config  # type: ignore[import-not-found]
 
 
 BASE_SPARK_CONFIGS: Dict[str, str] = {
@@ -146,13 +146,18 @@ def run_single_benchmark(
     rapids_jar_path: str,
     extra_spark_configs: Dict[str, str],
     coalesce: Optional[int] = None,
+    udf_key: str = "ascii_ignore",
 ) -> float:
+    cfg = get_config(udf_key)
+
     if mode == "cpu":
-        udf_name = "ascii_ignore_pandas"
-        udf_func = ascii_ignore_pandas
+        udf_name = f"{cfg.name}_pandas"
+        udf_mod = importlib.import_module(cfg.name)
     else:
-        udf_name = "ascii_ignore_gpu"
-        udf_func = ascii_ignore_gpu
+        udf_name = f"{cfg.name}_gpu"
+        udf_mod = importlib.import_module(f"{cfg.name}_gpu")
+
+    udf_func = getattr(udf_mod, udf_name)
 
     app_name = f"{udf_name}_{Path(data_path).stem}_{time.strftime('%Y%m%d_%H%M%S')}"
     spark_configs = dict(BASE_SPARK_CONFIGS)
@@ -174,14 +179,16 @@ def run_single_benchmark(
         timing_acc = spark.sparkContext.accumulator(
             dict(_CPU_TIMING_ZERO), _DictAccumulatorParam()
         )
-        udf_func = make_timed_ascii_ignore_pandas(timing_acc)
-        udf_name = "ascii_ignore_pandas"
+        make_timed = getattr(udf_mod, f"make_timed_{cfg.name}_pandas")
+        udf_func = make_timed(timing_acc)
+        udf_name = f"{cfg.name}_pandas"
     elif mode == "gpu":
         timing_acc = spark.sparkContext.accumulator(
             dict(_GPU_TIMING_ZERO), _DictAccumulatorParam()
         )
-        udf_func = make_timed_ascii_ignore_gpu(timing_acc)
-        udf_name = "ascii_ignore_gpu"
+        make_timed = getattr(udf_mod, f"make_timed_{cfg.name}_gpu")
+        udf_func = make_timed(timing_acc)
+        udf_name = f"{cfg.name}_gpu"
 
     try:
         register_udf(spark, udf_name, udf_func)
@@ -190,9 +197,9 @@ def run_single_benchmark(
         if coalesce is not None:
             df = df.coalesce(coalesce)
         df.createOrReplaceTempView("bench_table")
-        result_df = spark.sql(
-            f"SELECT *, {udf_name}(input_str) as result FROM bench_table"
-        )
+
+        sql = cfg.sql_template.format(udf_name=udf_name)
+        result_df = spark.sql(sql)
         result_df.write.mode("overwrite").parquet(output_path)
         elapsed = time.time() - start
     finally:
@@ -227,7 +234,6 @@ def run_single_benchmark(
             print(f"  {'estimated total H2D:':38s} {est_total_h2d:10.4f}s")
             print(f"  {'--------------------------------':38s}")
             print(f"  {'warm total H2D:':38s} {t['warm_h2d_s']:10.4f}s ({warm_batches} batches)")
-            # print(f"  {'warm total D2H:':38s} {t['warm_d2h_s']:10.4f}s ({warm_batches} batches)")
             print(f"  {'warm H2D per batch:':38s} {warm_h2d_per_batch:10.6f}s")
             print(
                 f"  {'cold init + first H2D:':38s} "
@@ -242,8 +248,14 @@ def run_single_benchmark(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark ascii_ignore")
+    parser = argparse.ArgumentParser(description="Benchmark UDF transfer overhead in Spark-RAPIDS")
     parser.add_argument("mode", choices=["cpu", "gpu"], help="Mode to run: cpu or gpu")
+    parser.add_argument(
+        "--udf",
+        default="ascii_ignore",
+        choices=available_names(),
+        help="UDF to benchmark (default: ascii_ignore)",
+    )
     parser.add_argument("--cluster", choices=["standalone", "local"], default="standalone",
                         help="Cluster mode: 'standalone' (default) or 'local'")
     parser.add_argument("--data-path", required=True, help="Input parquet data path")
@@ -268,9 +280,10 @@ def main() -> None:
         rapids_jar_path=str(jar_file),
         extra_spark_configs=extra_spark_configs,
         coalesce=args.coalesce,
+        udf_key=args.udf,
     )
-    udf_name = "ascii_ignore_pandas" if args.mode == "cpu" else "ascii_ignore_gpu"
-    print(f"E2E runtime (s) ({args.mode}/{udf_name}): {runtime:.2f}")
+    udf_label = f"{args.udf}_pandas" if args.mode == "cpu" else f"{args.udf}_gpu"
+    print(f"E2E runtime (s) ({args.mode}/{udf_label}): {runtime:.2f}")
 
 
 if __name__ == "__main__":
