@@ -25,15 +25,15 @@ Consider using only 1 thread/task on the machine.
 
 ##### CPU
 
-$$
+```math
 T_{\mathrm{CPU}}^{(1)} = T_c^{\mathrm{CPU}} + T_s + T_{p,\mathrm{jvm}}
-$$
+```
 
 ##### GPU
 
-$$
+```math
 T_{\mathrm{GPU}}^{(1)} = T_c^{\mathrm{GPU}} + T_s + T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}}
-$$
+```
 
 ### Multiple Threads
 
@@ -68,15 +68,15 @@ $$
 
 Assume GPU compute scales with some $\frac{1}{n} \le f(n) \le 1$.  
 
-$$
+```math
 T_{\mathrm{GPU}}^{(n)} = f(n)\, T_c^{\mathrm{GPU}} + \frac{1}{n} T_s + T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}}
-$$
+```
 
 As $n \rightarrow \infty$:
 
-$$
+```math
 T_{\mathrm{GPU}}^{(\infty)} = f(\infty)\, T_c^{\mathrm{GPU}} + T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}}
-$$
+```
 
 ## Empirical Analysis
 
@@ -143,13 +143,14 @@ Note: The model at $n=1$ underestimates the observed Spark op times, possibly du
 We conservatively assume $f(n) = 1$, i.e., GPU compute is fully serialized.
 
 Using the equations from above:
-$$
-T_{\mathrm{CPU}}^{(n)} = \frac{1}{n}T_c^{\mathrm{CPU}} + \frac{1}{n} T_s + T_{p,\mathrm{jvm}}
-$$
-$$
-T_{\mathrm{GPU}}^{(n)} = f(n)\, T_c^{\mathrm{GPU}} + \frac{1}{n} T_s + T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}}
-$$
 
+```math
+T_{\mathrm{CPU}}^{(n)} = \frac{1}{n}T_c^{\mathrm{CPU}} + \frac{1}{n} T_s + T_{p,\mathrm{jvm}}
+```
+
+```math
+T_{\mathrm{GPU}}^{(n)} = f(n)\, T_c^{\mathrm{GPU}} + \frac{1}{n} T_s + T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}}
+```
 
 
 | $n$ | $T_\mathrm{CPU}^{(n)}$ | $T_\mathrm{GPU}^{(n)}$ | GPU / CPU |
@@ -160,7 +161,7 @@ $$
 | 16  | 1.56                    | 5.17                    | 0.30×     |
 | 32  | 0.88                    | 5.15                    | 0.17×     |
 
-**Crossover at $n \approx 4$**: $T_\mathrm{GPU}$ barely decreases because the fixed overhead $T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}} = 3.64$ s dominates. Beyond $\sim\!4$ threads, the GPU UDF is *slower* than CPU.
+**Crossover at $n \approx 4$**: $T_\mathrm{GPU}$ barely decreases because the fixed overhead $T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}} = 3.64$ s dominates. Beyond ~4 threads, the GPU UDF is *slower* than CPU.
 
 #### With CUDA IPC
 
