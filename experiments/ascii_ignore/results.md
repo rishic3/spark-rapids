@@ -77,6 +77,8 @@ $$
 
 ## Empirical Analysis
 
+We consider the [ascii_ignore](experiments/ascii_ignore/src/ascii_ignore_impl.py) UDF and its [GPU implementation](experiments/ascii_ignore/src/ascii_ignore_gpu_impl.py) as a case study.
+
 ### Measuring $T^{(1)}$, $T_c$, and $T_{p,\mathrm{py}}$
 
 The results below measure running the UDF in a Spark job with **1 thread, 1 task**. 
