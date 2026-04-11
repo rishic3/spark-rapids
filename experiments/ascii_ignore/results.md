@@ -5,11 +5,14 @@
 ### Preliminaries
 
 Let $T_c$ be UDF compute time.  
+
 Let $T_s$ be round-trip serialization time.
 - 1 round trip: `writeArrowIPCArrowChunk + readArrowIPCChunkToArrowTable`.
+
 Let $T_p$ be round-trip PCIe transfer time. We decompose $T_p$ into two hops:
 - $T_{p,\mathrm{jvm}}$: JVM-side — `convertCudfToArrowTable + convertArrowTableToCudf`
 - $T_{p,\mathrm{py}}$: Python-side — `cudf.Series(_) + _.to_pandas()`
+
 Let $T^{(n)}$ be wall-clock time of the entire UDF op (including data transfer) with $n$ threads.
 
 We consider a machine with $n$ CPU cores, 1 PCIe bus, and 1 GPU.
