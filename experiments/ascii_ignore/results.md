@@ -26,13 +26,13 @@ Consider using only 1 thread/task on the machine.
 ##### CPU
 
 ```math
-T_{\mathrm{CPU}}^{(1)} = T_c^{\mathrm{CPU}} + T_s + T_{p,\mathrm{jvm}}
+\Large T_{\mathrm{CPU}}^{(1)} = T_c^{\mathrm{CPU}} + T_s + T_{p,\mathrm{jvm}}
 ```
 
 ##### GPU
 
 ```math
-T_{\mathrm{GPU}}^{(1)} = T_c^{\mathrm{GPU}} + T_s + T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}}
+\Large T_{\mathrm{GPU}}^{(1)} = T_c^{\mathrm{GPU}} + T_s + T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}}
 ```
 
 ### Multiple Threads
@@ -54,28 +54,28 @@ Consider $n$ threads/tasks.
 
 ##### CPU
 
-$$
-T_{\mathrm{CPU}}^{(n)} = \frac{1}{n}T_c^{\mathrm{CPU}} + \frac{1}{n} T_s + T_{p,\mathrm{jvm}}
-$$
+```math
+\Large T_{\mathrm{CPU}}^{(n)} = \frac{1}{n}T_c^{\mathrm{CPU}} + \frac{1}{n} T_s + T_{p,\mathrm{jvm}}
+```
 
 As $n \rightarrow \infty$:
 
-$$
-T_{\mathrm{CPU}}^{(\infty)} = T_{p,\mathrm{jvm}}
-$$
+```math
+\Large T_{\mathrm{CPU}}^{(\infty)} = T_{p,\mathrm{jvm}}
+```
 
 ##### GPU
 
 Assume GPU compute scales with some $\frac{1}{n} \le f(n) \le 1$.  
 
 ```math
-T_{\mathrm{GPU}}^{(n)} = f(n)\, T_c^{\mathrm{GPU}} + \frac{1}{n} T_s + T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}}
+\Large T_{\mathrm{GPU}}^{(n)} = f(n)\, T_c^{\mathrm{GPU}} + \frac{1}{n} T_s + T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}}
 ```
 
 As $n \rightarrow \infty$:
 
 ```math
-T_{\mathrm{GPU}}^{(\infty)} = f(\infty)\, T_c^{\mathrm{GPU}} + T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}}
+\Large T_{\mathrm{GPU}}^{(\infty)} = f(\infty)\, T_c^{\mathrm{GPU}} + T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}}
 ```
 
 ## Empirical Analysis
@@ -145,11 +145,11 @@ We conservatively assume $f(n) = 1$, i.e., GPU compute is fully serialized.
 Using the equations from above:
 
 ```math
-T_{\mathrm{CPU}}^{(n)} = \frac{1}{n}T_c^{\mathrm{CPU}} + \frac{1}{n} T_s + T_{p,\mathrm{jvm}}
+\Large T_{\mathrm{CPU}}^{(n)} = \frac{1}{n}T_c^{\mathrm{CPU}} + \frac{1}{n} T_s + T_{p,\mathrm{jvm}}
 ```
 
 ```math
-T_{\mathrm{GPU}}^{(n)} = f(n)\, T_c^{\mathrm{GPU}} + \frac{1}{n} T_s + T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}}
+\Large T_{\mathrm{GPU}}^{(n)} = f(n)\, T_c^{\mathrm{GPU}} + \frac{1}{n} T_s + T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}}
 ```
 
 
