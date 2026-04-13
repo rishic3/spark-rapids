@@ -51,7 +51,7 @@ For a simplified model, we assume the components are additive (disregarding pipe
 
 #### Formulas
 
-Assume the PCIe bus scales with some $1 \le p(n) \le n$, where 1 is perfect scaling, and $n$ is fully serialized. 
+Assume the PCIe bus scales with some $1 \le p(n) \le n$, where 1 is perfect scaling, and $n$ is fully serialized.  
 Similarly, assume GPU compute scales with some $1 \le g(n) \le n$. 
 
 ##### CPU
