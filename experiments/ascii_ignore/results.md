@@ -136,13 +136,18 @@ Where:
 | $T_{p,\mathrm{jvm}}$ (s)          | 0.196    | 0.246   | 0.039    | 0.049   |
 | $T_{p,\mathrm{py}}$ (s)           | 3.445    | 3.137   | 0.733    | 0.706   |
 
-Note: The model at $n=1$ underestimates the observed Spark op times, possibly due to additional effects like socket I/O, cuInit, Spark's internal Pandas to Arrow conversion, etc. 
+Note: The model at $n=1$ underestimates the observed Spark op times, possibly due to socket I/O, cuInit, Python worker startup, Spark's internal Arrow conversion, etc. The projections below are therefore conservative.
 
-#### Projected $T^{(n)}$ — 5M rows, 100k batch
+| Config   | Model $T_\mathrm{GPU}^{(1)}$ | Model overhead | Spark overhead | Gap   |
+| -------- | ----------------------------- | -------------- | -------------- | ----- |
+| 5M, 100k | 5.77 s                        | 4.28 s (74%)   | 9.42 s (86%)   | 5.13 s |
+| 5M, 10k  | 8.97 s                        | 3.99 s (45%)   | 8.52 s (63%)   | 4.53 s |
+| 1M, 100k | 1.22 s                        | 0.91 s (75%)   | 2.49 s (89%)   | 1.58 s |
+| 1M, 10k  | 1.91 s                        | 0.89 s (47%)   | 2.48 s (71%)   | 1.59 s |
 
-We conservatively assume $f(n) = 1$, i.e., GPU compute is fully serialized.
+#### Projected CUDA IPC Speedup
 
-Using the equations from above:
+Recall the models from above:
 
 ```math
 \Large T_{\mathrm{CPU}}^{(n)} = \frac{1}{n}T_c^{\mathrm{CPU}} + \frac{1}{n} T_s + T_{p,\mathrm{jvm}}
@@ -152,29 +157,18 @@ Using the equations from above:
 \Large T_{\mathrm{GPU}}^{(n)} = f(n)\, T_c^{\mathrm{GPU}} + \frac{1}{n} T_s + T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}}
 ```
 
+We assume for simplicity that CUDA IPC eliminates transfer and serialization, ($T_s, T_{p,\mathrm{jvm}}, T_{p,\mathrm{py}} \to 0$):
 
-| $n$ | $T_\mathrm{CPU}^{(n)}$ | $T_\mathrm{GPU}^{(n)}$ | GPU / CPU |
-| --- | ----------------------- | ----------------------- | --------- |
-| 1   | 22.09                   | 5.77                    | 3.8×      |
-| 4   | 5.67                    | 5.29                    | 1.1×      |
-| 8   | 2.93                    | 5.21                    | 0.56×     |
-| 16  | 1.56                    | 5.17                    | 0.30×     |
-| 32  | 0.88                    | 5.15                    | 0.17×     |
-
-**Crossover at $n \approx 4$**: $T_\mathrm{GPU}$ barely decreases because the fixed overhead $T_{p,\mathrm{jvm}} + T_{p,\mathrm{py}} = 3.64$ s dominates. Beyond ~4 threads, the GPU UDF is *slower* than CPU.
-
-#### With CUDA IPC
-
-We assume for simplicity that CUDA IPC eliminates transfer and serialization, i.e.: $T_s, T_{p,\mathrm{jvm}}, T_{p,\mathrm{py}} \to 0$.
-
-Thus the CUDA IPC model is: $T_\mathrm{GPU,IPC}^{(n)} = f(n)\, T_c^{\mathrm{GPU}}$
+```math
+\Large T_{\mathrm{GPU,IPC}}^{(n)} = f(n)\, T_c^{\mathrm{GPU}}
+```
 
 We consider two models for $f(n)$:
 
 - **$f(n) = 1$**: GPU compute is fully serialized (a single kernel saturates memory bandwidth).
 - **$f(n) = 1/\min(n, 4)$**: GPU scales linearly up to 4 concurrent kernels, then saturates.
 
-**$f(n) = 1$**:
+##### Est. Speedup w/ **$f(n) = 1$**
 
 | $n$ | $T_\mathrm{CPU}^{(n)}$ | $T_\mathrm{GPU}^{(n)}$ | $T_\mathrm{GPU,IPC}^{(n)}$ | IPC Speedup |
 | --- | ----------------------- | ----------------------- | --------------------------- | ----------- |
@@ -184,7 +178,7 @@ We consider two models for $f(n)$:
 | 16  | 1.56                    | 5.17                    | 1.49                        | 3.5×        |
 | 32  | 0.88                    | 5.15                    | 1.49                        | 3.5×        |
 
-**$f(n) = 1/\min(n, 4)$**:
+##### Est. Speedup w/ **$f(n) = 1/\min(n, 4)$**
 
 | $n$ | $T_\mathrm{CPU}^{(n)}$ | $T_\mathrm{GPU}^{(n)}$ | $T_\mathrm{GPU,IPC}^{(n)}$ | IPC Speedup |
 | --- | ----------------------- | ----------------------- | --------------------------- | ----------- |
