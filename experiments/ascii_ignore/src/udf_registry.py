@@ -38,19 +38,21 @@ REGISTRY = {
     "metric_status": UdfConfig(
         name="metric_status",
         input_columns=[
-            "cpu_pct", "gpu_pct", "mem_pct", "disk_io_pct", "net_bw_pct",
-            "frame_time_ms", "encode_latency_ms", "decode_latency_ms", "rtt_ms",
-            "jitter_ms", "packet_loss_pct", "input_latency_ms",
-            "gpu_temp_c", "gpu_mem_pct", "cpu_temp_c", "swap_pct",
-            "queue_depth", "error_rate_pct", "retry_pct", "thread_count",
+            "cpu_pct", "gpu_pct", "mem_pct", "frame_time_ms", "rtt_ms",
+            "packet_loss_pct", "gpu_temp_c", "gpu_mem_pct", "queue_depth",
+            "thread_count",
+            "hostname", "region", "session_id", "device_model",
+            "gpu_driver_ver", "os_info", "app_version", "error_message",
+            "client_ip", "user_agent",
         ],
         sql_template=(
             "SELECT *, {udf_name}(struct("
-            "cpu_pct, gpu_pct, mem_pct, disk_io_pct, net_bw_pct, "
-            "frame_time_ms, encode_latency_ms, decode_latency_ms, rtt_ms, "
-            "jitter_ms, packet_loss_pct, input_latency_ms, "
-            "gpu_temp_c, gpu_mem_pct, cpu_temp_c, swap_pct, "
-            "queue_depth, error_rate_pct, retry_pct, thread_count"
+            "cpu_pct, gpu_pct, mem_pct, frame_time_ms, rtt_ms, "
+            "packet_loss_pct, gpu_temp_c, gpu_mem_pct, queue_depth, "
+            "thread_count, "
+            "hostname, region, session_id, device_model, "
+            "gpu_driver_ver, os_info, app_version, error_message, "
+            "client_ip, user_agent"
             ")) as result FROM bench_table"
         ),
         input_mode="dataframe",
