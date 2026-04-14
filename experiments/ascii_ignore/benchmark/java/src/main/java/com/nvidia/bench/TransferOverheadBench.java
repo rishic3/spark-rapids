@@ -77,6 +77,17 @@ public class TransferOverheadBench {
         byte[] toByteArray() { return baos.toByteArray(); }
     }
 
+    /** Discards IPC bytes, only tracking total size. Used for write-only benchmarks. */
+    static class DiscardingBufferConsumer implements HostBufferConsumer {
+        long totalBytes = 0;
+
+        @Override
+        public void handleBuffer(HostMemoryBuffer buffer, long length) {
+            totalBytes += length;
+            buffer.close();
+        }
+    }
+
     /**
      * Reads Arrow IPC bytes from a byte[] instead of a socket.
      * Mirrors StreamToBufferProvider in GpuArrowReader.scala.
@@ -138,7 +149,7 @@ public class TransferOverheadBench {
         ArrowIPCWriterOptions opts = builder.build();
 
         for (int w = 0; w < warmup; w++) {
-            InMemoryBufferConsumer consumer = new InMemoryBufferConsumer();
+            DiscardingBufferConsumer consumer = new DiscardingBufferConsumer();
             try (TableWriter writer = Table.writeArrowIPCChunked(opts, consumer)) {
                 for (Table batch : batches) writer.write(batch);
             }
@@ -152,7 +163,7 @@ public class TransferOverheadBench {
         for (int m = 0; m < measured; m++) {
             syncGpu();
             long p1Accum = 0, p2Accum = 0;
-            InMemoryBufferConsumer consumer = new InMemoryBufferConsumer();
+            DiscardingBufferConsumer consumer = new DiscardingBufferConsumer();
             try (TableWriter writer = Table.writeArrowIPCChunked(opts, consumer)) {
                 for (Table batch : batches) {
                     long t0 = System.nanoTime();
@@ -171,14 +182,14 @@ public class TransferOverheadBench {
     }
 
     /**
-     * Arrow IPC read with split timing.
+     * Arrow IPC read with split timing. Each batch has its own IPC stream.
      *
      * Inside StreamedTableReader.getNextIfAvailable(rowTarget):
      *   phase1: readArrowIPCChunkToArrowTable  (IPC deserialize — IPC bytes → host Arrow)
      *   --- NeedGpu callback fires here ---
      *   phase2: convertArrowTableToCudf        (H2D — host Arrow → GPU cudf)
      */
-    static SplitResult benchArrowRead(byte[] ipcBytes, int batchSize, int warmup, int measured) {
+    static SplitResult benchArrowRead(byte[][] perBatchIpc, int batchSize, int warmup, int measured) {
         final long[] splitNanos = new long[1];
 
         ArrowIPCOptions opts = ArrowIPCOptions.builder()
@@ -186,10 +197,12 @@ public class TransferOverheadBench {
             .build();
 
         for (int w = 0; w < warmup; w++) {
-            InMemoryBufferProvider provider = new InMemoryBufferProvider(ipcBytes);
-            try (StreamedTableReader reader = Table.readArrowIPCChunked(opts, provider)) {
-                Table t;
-                while ((t = reader.getNextIfAvailable(batchSize)) != null) t.close();
+            for (byte[] ipcBytes : perBatchIpc) {
+                InMemoryBufferProvider provider = new InMemoryBufferProvider(ipcBytes);
+                try (StreamedTableReader reader = Table.readArrowIPCChunked(opts, provider)) {
+                    Table t;
+                    while ((t = reader.getNextIfAvailable(batchSize)) != null) t.close();
+                }
             }
             syncGpu();
         }
@@ -201,16 +214,18 @@ public class TransferOverheadBench {
         for (int m = 0; m < measured; m++) {
             syncGpu();
             long p1Accum = 0, p2Accum = 0;
-            InMemoryBufferProvider provider = new InMemoryBufferProvider(ipcBytes);
-            try (StreamedTableReader reader = Table.readArrowIPCChunked(opts, provider)) {
-                while (true) {
-                    long t0 = System.nanoTime();
-                    Table t = reader.getNextIfAvailable(batchSize);
-                    long t2 = System.nanoTime();
-                    if (t == null) break;
-                    t.close();
-                    p1Accum += splitNanos[0] - t0;
-                    p2Accum += t2 - splitNanos[0];
+            for (byte[] ipcBytes : perBatchIpc) {
+                InMemoryBufferProvider provider = new InMemoryBufferProvider(ipcBytes);
+                try (StreamedTableReader reader = Table.readArrowIPCChunked(opts, provider)) {
+                    while (true) {
+                        long t0 = System.nanoTime();
+                        Table t = reader.getNextIfAvailable(batchSize);
+                        long t2 = System.nanoTime();
+                        if (t == null) break;
+                        t.close();
+                        p1Accum += splitNanos[0] - t0;
+                        p2Accum += t2 - splitNanos[0];
+                    }
                 }
             }
             syncGpu();
@@ -223,15 +238,20 @@ public class TransferOverheadBench {
 
     // ─── Helpers ────────────────────────────────────────────────────────────
 
-    static byte[] writeToIpcBytes(Table[] batches) {
+    /** Serialize each batch into its own IPC stream to avoid hitting the 2 GB array limit. */
+    static byte[][] writePerBatchIpcBytes(Table[] batches) {
         int numCols = batches[0].getNumberOfColumns();
-        ArrowIPCWriterOptions.Builder builder = ArrowIPCWriterOptions.builder();
-        for (int i = 0; i < numCols; i++) builder.withColumnNames("col" + i);
-        InMemoryBufferConsumer consumer = new InMemoryBufferConsumer();
-        try (TableWriter writer = Table.writeArrowIPCChunked(builder.build(), consumer)) {
-            for (Table batch : batches) writer.write(batch);
+        byte[][] result = new byte[batches.length][];
+        for (int b = 0; b < batches.length; b++) {
+            ArrowIPCWriterOptions.Builder builder = ArrowIPCWriterOptions.builder();
+            for (int i = 0; i < numCols; i++) builder.withColumnNames("col" + i);
+            InMemoryBufferConsumer consumer = new InMemoryBufferConsumer();
+            try (TableWriter writer = Table.writeArrowIPCChunked(builder.build(), consumer)) {
+                writer.write(batches[b]);
+            }
+            result[b] = consumer.toByteArray();
         }
-        return consumer.toByteArray();
+        return result;
     }
 
     static Table[] splitIntoBatches(Table table, int batchSize) {
@@ -449,14 +469,17 @@ public class TransferOverheadBench {
         printTimes("  write total", writeResult.totalNs, batches.length);
         syncGpu();
 
-        // Pre-serialize IPC bytes for read benchmark
-        byte[] ipcBytes = writeToIpcBytes(batches);
-        double ipcMB = ipcBytes.length / (1024.0 * 1024.0);
-        System.out.printf("  (IPC stream size: %.1f MB)%n%n", ipcMB);
+        // Pre-serialize IPC bytes for read benchmark (per-batch to avoid 2 GB array limit)
+        byte[][] perBatchIpc = writePerBatchIpcBytes(batches);
+        long ipcTotalBytes = 0;
+        for (byte[] b : perBatchIpc) ipcTotalBytes += b.length;
+        double ipcMB = ipcTotalBytes / (1024.0 * 1024.0);
+        System.out.printf("  (IPC stream size: %.1f MB across %d streams)%n%n",
+            ipcMB, perBatchIpc.length);
 
         // 2. Arrow IPC read (readArrowIPCChunkToArrowTable + convertArrowTableToCudf)
         System.out.println("  [2/2] Arrow IPC read ...");
-        SplitResult readResult = benchArrowRead(ipcBytes, effBatchSize, warmup, measured);
+        SplitResult readResult = benchArrowRead(perBatchIpc, effBatchSize, warmup, measured);
         printTimes("  readArrowIPCChunkToArrow (IPC deser)", readResult.phase1Ns, batches.length);
         printTimes("  convertArrowTableToCudf  (H2D)", readResult.phase2Ns, batches.length);
         printTimes("  read total", readResult.totalNs, batches.length);
