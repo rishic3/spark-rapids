@@ -1704,6 +1704,12 @@ This will force full Scala code rebuild in downstream modules.
                                         <include name="**/src/main"/>
                                         <include name="**/src/test"/>
                                         <exclude name="**/target/*/generated/src/**"/>
+                                        <!-- Local agent workspaces: isolated RapidsUDF skill
+                                             projects and skill templates live under these roots
+                                             and are not part of the plugin source tree. Keep
+                                             these exclusions even if they match **/src/main. -->
+                                        <exclude name="opt/**"/>
+                                        <exclude name=".claude/**"/>
                                     </dirset>
                                 </pathconvert>
                                 <echo>Checking scalastyle for all modules using following paths:

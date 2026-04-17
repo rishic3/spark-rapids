@@ -18,7 +18,7 @@ model: inherit
 ## Prerequisites
 
 - Passing optimized `opt/<OperatorName>/` project from **operator-optimize-cudf**, with a recorded speedup.
-- Clean `git status` in the plugin tree.
+- No uncommitted modifications under the plugin source trees — so any diff you apply is attributable to this skill. Untracked/modified files elsewhere (`.gitignore`, top-level `*.md`, `opt/`, etc.) are fine and should be ignored.
 
 Respect the safety rules in `AGENTS.md` (minimal diffs, no `--no-verify`, `./build/make-scala-version-build-files.sh 2.13` if any `pom.xml` changes). Steps 4–5 need `/tmp` + GPU access; re-run unsandboxed if they fail due to sandboxing.
 
