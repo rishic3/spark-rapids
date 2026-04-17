@@ -36,6 +36,8 @@ Derive `<OperatorName>` (CamelCase, e.g. `GpuUpper`) and `<snake_name>` (e.g. `g
 
 > **Scope note:** Work stays entirely inside the skill project. The extracted code is a self-contained `RapidsUDF` reproduction intended for isolated testing and optimization — it is **not** back-integrated into the plugin tree. No shim updates are required.
 
+> **Spark version:** The template pom pins `<spark.version>3.5.7</spark.version>`, matching the `-Dbuildver=357` default used by **operator-backport** (compile-time shim) and the `/opt/spark-3.5.7` install. Leave this alone unless the user explicitly targets a different Spark version, in which case update `<spark.version>` in the scaffolded project's `pom.xml` and make sure the matching Spark is installed.
+
 ## Step 1: Identify and Scope
 
 1. Locate the target class in `sql-plugin/src/main/scala/` or `sql-plugin/src/main/spark<ver>/scala/`. If multiple shim versions exist, **use the latest unshimmed / highest-version copy**.

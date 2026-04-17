@@ -69,14 +69,15 @@ mvn test -pl tests                                       # unit tests
 mvn test -pl tests -Dsuites=<FullyQualifiedSuiteName>    # scoped to operator's suite, if any
 ```
 
-Integration tests live in `integration_tests/src/main/python/` and consume the optimized dist jar from Step 4 automatically. Find the relevant pytest file for the operator's SQL function (e.g. `conditionals_test.py` for `coalesce`/`nvl`) and run it:
+Integration tests live in `integration_tests/src/main/python/` and consume the optimized dist jar from Step 4 automatically. `run_pyspark_from_build.sh` **requires `SPARK_HOME` to be set** — it will exit otherwise, and it does not auto-detect. Point it at the 3.5.7 install so the Spark runtime matches the compile-time `buildver=357` shim, then find the relevant pytest file for the operator's SQL function (e.g. `conditionals_test.py` for `coalesce`/`nvl`) and run it:
 
 ```bash
 cd integration_tests
+export SPARK_HOME=/opt/spark-3.5.7
 TEST=src/main/python/<file>.py::<test_name> ./run_pyspark_from_build.sh
 ```
 
-Add `--delta_lake` / `--iceberg` if the operator touches those paths.
+Add `--delta_lake` / `--iceberg` if the operator touches those paths. If the user chose a different `buildver` in Step 4, point `SPARK_HOME` at the matching install instead.
 
 On failure, triage: a GPU-vs-CPU mismatch means revert and return to `operator-optimize-cudf`; a legitimate test update (e.g. a fallback test that no longer triggers because the optimization broadens GPU coverage) is fine — flag it in the summary.
 

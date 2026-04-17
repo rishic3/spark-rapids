@@ -19,7 +19,7 @@
         <scala.binary.version>2.12</scala.binary.version>
         <scala.version>2.12.15</scala.version>
         <!-- Spark/RAPIDS versions -->
-        <spark.version>3.5.5</spark.version>
+        <spark.version>3.5.7</spark.version>
         <rapids4spark.version>26.02.2</rapids4spark.version>
         <!-- Memory leak debugging -->
         <!-- SLF4J logs are off by default, enable cuDF logs if memory leak debugging is enabled -->
