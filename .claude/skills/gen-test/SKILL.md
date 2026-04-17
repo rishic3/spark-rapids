@@ -22,12 +22,13 @@ The user should provide:
 
 - **Target operator** — a `Gpu*` expression class in `sql-plugin/src/main/scala/` (e.g. `GpuUpper`, `GpuSubstring`, `GpuHex`). Usually extends `GpuUnaryExpression`, `GpuBinaryExpression`, or `GpuTernaryExpression` and implements `doColumnar`.
 - **SQL function name** — how the operator is invoked in Spark SQL (e.g. `upper`, `substring`, `hex`). This is the CPU baseline.
-- **Optional scope narrowing** — the user may target:
+- **Optional scope narrowing** — the user may target a subset of the operator:
   - A specific `doColumnar` overload (unary vs. binary form).
   - A specific input-type branch (e.g. only the `StringType` branch of `GpuCast`).
-  - A specific sequence of cuDF API calls inside a helper method.
 
 If it is unclear what to extract, **ask the user for clarification.**
+
+> **Granularity principle:** The extraction unit is always a whole operator invocation, not a helper method. Even when the planned optimization lives inside a private helper (e.g. `NullUtilities.mergeNulls`, `GpuDivModLike.replaceZeroWithNull`, `boolInverted`), extract the *enclosing operator's* `doColumnar` and keep the helper in place. The helper gets modified during the optimize-cudf loop, but measurements must be at operator granularity — a 10x speedup in a helper that is 2% of the operator is a 2% operator-level improvement, and isolated helper microbenchmarks would misrepresent the real impact.
 
 Derive `<OperatorName>` (CamelCase, e.g. `GpuUpper`) and `<snake_name>` (e.g. `gpu_upper`) from the target class name.
 
@@ -38,13 +39,14 @@ Derive `<OperatorName>` (CamelCase, e.g. `GpuUpper`) and `<snake_name>` (e.g. `g
 ## Step 1: Identify and Scope
 
 1. Locate the target class in `sql-plugin/src/main/scala/` or `sql-plugin/src/main/spark<ver>/scala/`. If multiple shim versions exist, **use the latest unshimmed / highest-version copy**.
-2. Identify the exact cuDF call sequence to extract. Common cases:
-   - Entire `doColumnar` body (simple operators).
-   - A single input-type branch of a `match`/`if` chain.
-   - A private helper method used inside `doColumnar`.
+2. Identify the extraction unit. This is always an operator-sized body — either:
+   - The entire `doColumnar` body (simple operators), or
+   - A single input-type branch of a `match`/`if` chain inside `doColumnar` (e.g. only the `StringType` branch of `GpuCast`).
+   Do **not** extract a private helper alone. If the intended optimization lives inside a helper, extract the whole `doColumnar` (or whole branch) and pull in the helper as-is — the helper is modified later during optimize-cudf, but benchmarked as part of the full operator.
 3. Identify the operator's Catalyst arity and Spark input/output types. Needed to:
    - Pick the right `args: ColumnVector*` indexing in the RapidsUDF.
    - Pass the correct return `DataType` to `spark.udf.register`.
+4. **If the operator does not fit the templates** — e.g. it is variadic (`GpuCoalesce`, `GpuGreatest`, `GpuConcat`), does not implement `doColumnar` (evaluates directly on a `ColumnarBatch`), operates on nested types in ways the `args: ColumnVector*` signature cannot express, or requires scalar-literal fast paths that disappear behind a `RapidsUDF` registration — **stop and surface this to the user before extracting**. Describe the mismatch and what you would have to simplify or simulate; let the user decide whether to proceed, narrow the scope, or pick a different target. Do not try to shoehorn a bad fit into the template.
 
 ## Step 2: Set Up the Project
 
@@ -99,14 +101,15 @@ import ai.rapids.cudf._
 import com.nvidia.spark.RapidsUDF
 import com.udf.Arm.{withResource, closeOnExcept}
 
-class <OperatorName>RapidsUDF extends RapidsUDF with Serializable {
+// Extend a FunctionN matching the operator's arity (required for spark.udf.register).
+// Reference: tests/src/test/scala/com/nvidia/spark/rapids/tests/udf/scala/URLEncode.scala
+class <OperatorName>RapidsUDF
+    extends Function<N>[<T1>, ..., <R>]
+    with RapidsUDF
+    with Serializable {
 
-  // Row-by-row CPU path is not used (Spark SQL is the CPU baseline).
-  // Kept only because RapidsUDF is typically paired with a Function*.
-  // Throw if Spark ever falls back to row-at-a-time execution.
-  def apply(args: Any*): Any =
-    throw new UnsupportedOperationException(
-      "Extracted operator RapidsUDF does not implement CPU row-by-row execution")
+  override def apply(<x1>: <T1>, ..., <xN>: <TN>): <R> =
+    throw new UnsupportedOperationException("CPU row-by-row path not used")
 
   override def evaluateColumnar(numRows: Int, args: ColumnVector*): ColumnVector = {
     // TODO: Paste the extracted cuDF API call sequence here, verbatim.
