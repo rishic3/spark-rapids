@@ -52,7 +52,7 @@ Derive `<OperatorName>` (CamelCase, e.g. `GpuUpper`) and `<snake_name>` (e.g. `g
 
 Copy the template project:
 ```bash
-cp -r .claude/skills/operator/gen-test/templates <project_root>/<OperatorName>/
+cp -r .claude/skills/operator/gen-test/templates <project_root>/opt/<OperatorName>/
 ```
 
 This provides a complete Maven project with all test and benchmark infrastructure.
@@ -170,7 +170,7 @@ After the test passes:
 ## Output
 
 Upon successful completion:
-- Project directory: `<project_root>/<OperatorName>/`
+- Project directory: `<project_root>/opt/<OperatorName>/`
 - Extracted RapidsUDF: `src/main/scala/com/udf/<OperatorName>RapidsUDF.scala`
 - Comparison test: `src/test/scala/com/udf/SqlOperatorComparisonTest.scala`
 
