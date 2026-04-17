@@ -1,6 +1,6 @@
 ---
 name: operator-optimize-cudf
-description: Iteratively optimizes an extracted Spark RAPIDS operator's RapidsUDF reproduction for GPU performance. Runs a loop of profiling, one targeted change, comparison test, and GPU microbenchmark until performance converges or the iteration budget is exhausted.
+description: Iteratively optimizes an extracted Spark RAPIDS operator's RapidsUDF reproduction for GPU performance. Runs a loop of profiling, one targeted change, comparison test, and GPU microbenchmark until performance converges or the iteration budget is exhausted. This is step 3 of 4 in the operator optimization workflow (extract+test -> benchmark -> optimize -> backport).
 model: inherit
 ---
 
@@ -124,7 +124,7 @@ After completing all iterations (or early-stopping), report:
 3. **Speedup** — baseline / final.
 4. **Successful optimizations** — what changes improved performance and by how much each.
 5. **Failed optimizations** — what was attempted but did not help.
-6. **Port-back note** — remind the user that the plugin source tree was NOT modified. If they want to land the optimizations upstream, they should port the winning `evaluateColumnar` changes into the corresponding `doColumnar` in `sql-plugin/src/main/scala/...`, and update all affected Spark-version shims (see `AGENTS.md` → "Shim Layer Architecture").
+6. **Port-back note** — remind the user that the plugin source tree was NOT modified. If they want to land the optimizations upstream, run the **operator-backport** skill, which handles porting the winning `evaluateColumnar` changes into the corresponding plugin source (including any shims), running scalastyle, building the jar, and executing the relevant integration tests.
 
 ## Output
 

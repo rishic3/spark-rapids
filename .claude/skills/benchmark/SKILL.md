@@ -1,6 +1,6 @@
 ---
 name: operator-benchmark
-description: Benchmarks an extracted Spark RAPIDS operator at Spark scale (CPU SQL vs. GPU RapidsUDF) and at libcudf microbenchmark scale (GPU only). This is step 2 of 3 in the operator optimization workflow (extract+test -> benchmark -> optimize). Use after the gen-test skill has produced a passing SqlOperatorComparisonTest for the extracted operator.
+description: Benchmarks an extracted Spark RAPIDS operator at Spark scale (CPU SQL vs. GPU RapidsUDF) and at libcudf microbenchmark scale (GPU only). This is step 2 of 4 in the operator optimization workflow (extract+test -> benchmark -> optimize -> backport). Use after the gen-test skill has produced a passing SqlOperatorComparisonTest for the extracted operator.
 model: inherit
 ---
 

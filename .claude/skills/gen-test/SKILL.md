@@ -1,6 +1,6 @@
 ---
 name: operator-gen-test
-description: Extracts a Spark RAPIDS plugin operator's cuDF implementation into a standalone RapidsUDF and generates a comparison test against Spark's CPU SQL baseline. This is step 1 of 3 in the operator optimization workflow (extract+test -> benchmark -> optimize). Use this skill when you want to isolate and later optimize an existing `Gpu*` expression (or a specific branch / sequence of cuDF API calls within one) from the sql-plugin codebase.
+description: Extracts a Spark RAPIDS plugin operator's cuDF implementation into a standalone RapidsUDF and generates a comparison test against Spark's CPU SQL baseline. This is step 1 of 4 in the operator optimization workflow (extract+test -> benchmark -> optimize -> backport). Use this skill when you want to isolate and later optimize an existing `Gpu*` expression (or a specific branch / sequence of cuDF API calls within one) from the sql-plugin codebase.
 model: inherit
 ---
 
