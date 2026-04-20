@@ -1710,6 +1710,7 @@ This will force full Scala code rebuild in downstream modules.
                                              these exclusions even if they match **/src/main. -->
                                         <exclude name="opt/**"/>
                                         <exclude name=".claude/**"/>
+                                        <exclude name=".codex/**"/>
                                     </dirset>
                                 </pathconvert>
                                 <echo>Checking scalastyle for all modules using following paths:
