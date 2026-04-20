@@ -21,18 +21,30 @@ import com.udf.Arm.{closeAll, withResource}
 /**
  * GPU-only microbenchmark runner for an extracted Spark RAPIDS operator.
  *
- * Use the paired Spark benchmark (SparkBenchRunner + executeCpu) for CPU vs. GPU
- * end-to-end comparisons; use this microbenchmark for tight optimization loops
- * where you want to isolate libcudf costs from Spark overhead.
+ * This is the only runner used by the optimize loop — it isolates the
+ * `evaluateColumnar` libcudf work from Spark overhead. Spark-level A/B (with
+ * the actual plugin jar) is owned by `bench/spark_bench.sh` and only runs
+ * during the operator-backport skill, never inside the optimize loop.
  *
- *   Read Parquet (via cuDF Table.readParquet) once
+ * Two modes (single JVM, single RMM pool, single cuDF native load):
+ *   --data-root DIR   sweep every subdirectory of DIR (one Parquet dataset
+ *                     per advertised type — produced by bench/gen_data.sh).
+ *                     Prints one min/median row per case and a final table.
+ *   --data-path DIR   single Parquet dataset (used with --profile so an nsys
+ *                     report contains exactly one case).
+ *
+ * Per case:
+ *   Read Parquet (via cuDF Table.readParquet) once, off-clock
  *   -> warmup `evaluateColumnar` runs
  *   -> measured `evaluateColumnar` runs
  *   -> report min / median ms
  *
  * Usage:
  *   mvn exec:java -Dexec.mainClass=com.udf.bench.MicroBenchRunner \
- *     -Dexec.args="--data-path data/bench_data --rows 1000000"
+ *     -Dexec.args="--data-root data --rows 10000000"
+ *
+ *   mvn exec:java -Dexec.mainClass=com.udf.bench.MicroBenchRunner \
+ *     -Dexec.args="--data-path data/long --rows 10000000 --profile"
  */
 object MicroBenchRunner {
 
@@ -43,19 +55,19 @@ object MicroBenchRunner {
   /**
    * TODO: Execute the extracted RapidsUDF via `evaluateColumnar`.
    *
-   * Index the input columns of `table` in the same order as the test data
-   * schema (skip the `id` column if present — it is not an operator input).
+   * `bench/gen_data.sh` writes only the operator's input columns (no synthetic
+   * `id`), so the columns in `table` align 1:1 with `args: ColumnVector*`.
    *
-   * Example (unary string op, schema = [id, s]):
+   * Example (unary string op, schema = [s]):
    * {{{
-   *   val udf = new com.udf.GpuUpperRapidsUDF()
-   *   udf.evaluateColumnar(numRows, table.getColumn(1))
+   *   val udf = new com.udf.<Op>StringUDF()
+   *   udf.evaluateColumnar(numRows, table.getColumn(0))
    * }}}
    *
-   * Example (binary op, schema = [id, a, b]):
+   * Example (binary op, schema = [a, b]):
    * {{{
-   *   val udf = new com.udf.GpuSomeBinaryRapidsUDF()
-   *   udf.evaluateColumnar(numRows, table.getColumn(1), table.getColumn(2))
+   *   val udf = new com.udf.<Op>LongUDF()
+   *   udf.evaluateColumnar(numRows, table.getColumn(0), table.getColumn(1))
    * }}}
    *
    * @param table   dataset loaded on GPU
@@ -67,45 +79,72 @@ object MicroBenchRunner {
   def main(args: Array[String]): Unit = {
     val parsed = parseArgs(args)
 
-    val dataPath = parsed.getOrElse("data-path",
-      throw new IllegalArgumentException("--data-path is required"))
+    val dataPathOpt = parsed.get("data-path")
+    val dataRootOpt = parsed.get("data-root")
     val maxRows = parsed.getOrElse("rows", "-1").toInt
     val rmmAllocFraction = parsed.getOrElse("pool-fraction", DefaultRmmAllocFraction.toString).toFloat
     val warmup = parsed.getOrElse("warmup", DefaultWarmup.toString).toInt
     val measured = parsed.getOrElse("measured", DefaultMeasured.toString).toInt
     val profile = parsed.contains("profile")
 
-    // Initialize RMM pool
+    val cases: Seq[(String, String)] = (dataPathOpt, dataRootOpt) match {
+      case (Some(p), None) =>
+        Seq(new File(p).getName -> p)
+      case (None, Some(root)) =>
+        if (profile) throw new IllegalArgumentException(
+          "--profile requires --data-path (single case); --data-root would mix cases in one nsys report")
+        val rootFile = new File(root)
+        val subdirs = Option(rootFile.listFiles()).getOrElse(Array.empty)
+          .filter(_.isDirectory).sortBy(_.getName)
+        if (subdirs.isEmpty) throw new IllegalArgumentException(
+          s"No case subdirectories found under --data-root $root")
+        subdirs.toSeq.map(d => d.getName -> d.getAbsolutePath)
+      case _ =>
+        throw new IllegalArgumentException("Pass exactly one of --data-path or --data-root")
+    }
+
     if (!Rmm.isInitialized()) {
       val memInfo = Cuda.memGetInfo()
       val poolSize = (memInfo.free * rmmAllocFraction).toLong & ~255L
       Rmm.initialize(RmmAllocationMode.POOL, null, poolSize)
     }
 
-    // Read Parquet data into cuDF table
-    withResource(readParquetData(dataPath, maxRows)) { table =>
-      val numRows = table.getRowCount.toInt
-      val numCols = table.getNumberOfColumns
-      val mb = getTableSizeMB(table)
-      println(f"Loaded $numRows%,d rows x $numCols columns ($mb%.1f MB) from: $dataPath")
-      println(s"Microbenchmark (GPU only): warmup=$warmup, measured=$measured")
+    println(s"Microbenchmark (GPU only): warmup=$warmup, measured=$measured, cases=${cases.size}")
 
-      try {
-        val times = runBenchmark(warmup, measured, profile = profile) {
-          withResource(executeGpu(table, numRows)) { _ => }
+    val results = cases.map { case (label, path) =>
+      withResource(readParquetData(path, maxRows)) { table =>
+        val numRows = table.getRowCount.toInt
+        val numCols = table.getNumberOfColumns
+        val mb = getTableSizeMB(table)
+        println(f"\n[$label] loaded $numRows%,d rows x $numCols cols ($mb%.1f MB) from $path")
+        try {
+          val times = runBenchmark(warmup, measured, profile = profile) {
+            withResource(executeGpu(table, numRows)) { _ => }
+          }
+          val medianMs = times(times.length / 2) / 1e6
+          val minMs = times(0) / 1e6
+          println(
+            f"[$label] GPU  | $numRows%,14d rows | median $medianMs%10.3f ms | min $minMs%10.3f ms")
+          (label, numRows, medianMs, minMs, None: Option[String])
+        } catch {
+          case e: Exception =>
+            System.err.println(s"[$label] GPU microbenchmark failed: ${e.getMessage}")
+            e.printStackTrace(System.err)
+            (label, 0, Double.NaN, Double.NaN, Some(e.getClass.getSimpleName))
         }
-        val medianMs = times(times.length / 2) / 1e6
-        val minMs = times(0) / 1e6
-        println(
-          f"   GPU  | $numRows%,14d rows | median $medianMs%10.3f ms | min $minMs%10.3f ms")
-      } catch {
-        case e: Exception =>
-          System.err.println(s"GPU microbenchmark failed: ${e.getMessage}")
-          e.printStackTrace(System.err)
-          sys.exit(1)
       }
     }
 
+    if (cases.size > 1) {
+      println("\n=== Microbenchmark summary (median ms, lower is better) ===")
+      println(f"${"case"}%-20s ${"rows"}%14s ${"median_ms"}%12s ${"min_ms"}%12s  status")
+      results.foreach { case (label, n, med, min, err) =>
+        val status = err.getOrElse("ok")
+        println(f"$label%-20s $n%,14d $med%12.3f $min%12.3f  $status")
+      }
+    }
+
+    if (results.exists(_._5.isDefined)) sys.exit(1)
     System.exit(0)
   }
 
@@ -182,6 +221,7 @@ object MicroBenchRunner {
     while (i < args.length) {
       args(i) match {
         case "--data-path"     => map += ("data-path" -> args(i + 1)); i += 2
+        case "--data-root"     => map += ("data-root" -> args(i + 1)); i += 2
         case "--warmup"        => map += ("warmup" -> args(i + 1)); i += 2
         case "--measured"      => map += ("measured" -> args(i + 1)); i += 2
         case "--rows"          => map += ("rows" -> args(i + 1)); i += 2

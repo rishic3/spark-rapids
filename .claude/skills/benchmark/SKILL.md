@@ -1,6 +1,6 @@
 ---
 name: operator-benchmark
-description: Benchmarks an extracted Spark RAPIDS operator at Spark scale (CPU SQL vs. GPU RapidsUDF) and at libcudf microbenchmark scale (GPU only). This is step 2 of 4 in the operator optimization workflow (extract+test -> benchmark -> optimize -> backport). Use after the gen-test skill has produced a passing SqlOperatorComparisonTest for the extracted operator.
+description: Generates per-type Parquet datasets via DBGen (`bench/gen_data.sh`) and runs the libcudf-only microbenchmark (`MicroBenchRunner`) on the extracted RapidsUDF for every type the operator advertises. This is step 2 of 4 in the operator optimization workflow (extract+test -> benchmark -> optimize -> backport). Use after the gen-test skill has produced a passing `SqlOperatorComparisonTest`. Spark-level A/B is owned by the backport skill and is not part of this loop.
 model: inherit
 ---
 
@@ -8,94 +8,108 @@ model: inherit
 
 ## Workflow
 
-- [ ] Step 1: Implement `BenchUtils` (fill in TODO methods)
-- [ ] Step 2: Validate with a small dataset
-- [ ] Step 3: Generate full benchmark data and run SparkBenchRunner (CPU vs. GPU)
-- [ ] Step 4: Implement `MicroBenchRunner.executeGpu` and run the GPU-only microbenchmark
+- [ ] Step 1: Build (or locate) the `datagen` jar
+- [ ] Step 2: Fill in `bench/gen_data.sh` AND `bench/spark_bench.sh` (labels must match)
+- [ ] Step 3: Generate Parquet datasets (one directory per type)
+- [ ] Step 4: Implement `MicroBenchRunner.executeGpu`
+- [ ] Step 5: Run the GPU microbenchmark on each per-type dataset and record the baselines
 
 ## Prerequisites
 
-- Project directory from Step 1 (operator-gen-test) with passing `SqlOperatorComparisonTest`
+- Project from operator-gen-test with passing `SqlOperatorComparisonTest`
 - Extracted `<OperatorName>RapidsUDF` implemented
+- Spark 3.5.7 installed; `SPARK_HOME` will be set in Step 3
+- Type set captured from the operator's `ExprChecks` (operator-gen-test Step 1.3)
 
-Derive `<OperatorName>` and `<snake_name>` from the target class name.
+> Steps 3 and 5 need `/tmp` + GPU access. If commands fail due to sandbox restrictions, re-run them unsandboxed.
 
-> **Note:** Commands require access to `/tmp` (Spark temp storage) and `/dev` (GPU device). If commands fail due to sandbox restrictions, re-run them unsandboxed.
+## Step 1: Build the `datagen` jar
 
-## Step 1: Implement `BenchUtils`
+`bench/gen_data.sh` uses `DBGen` from the spark-rapids `datagen` module. Build the jar against Spark 3.5.7 if it isn't already built. From the spark-rapids repo root:
 
-Open `src/main/scala/com/udf/bench/BenchUtils.scala` and fill in the three TODO methods:
-
-1. **`generateSyntheticData(spark, numRows, numPartitions)`** — produce a DataFrame matching the schema used in `SqlOperatorComparisonTest.createTestData`. Use `spark.range` plus `rand()`-driven expressions so it scales to tens of millions of rows. Favor realistic payload sizes — the GPU win usually grows with row size / column width.
-
-2. **`executeCpu(spark, df)`** — the CPU path:
-   - `spark.conf.set("spark.rapids.sql.enabled", "false")`
-   - Register `df` as `bench_table`.
-   - Run the same CPU SQL used in the test, projecting only `id` plus the operator result (avoid `SELECT *`).
-
-3. **`executeGpu(spark, df)`** — the GPU path:
-   - `spark.conf.set("spark.rapids.sql.enabled", "true")`
-   - Register `new <OperatorName>RapidsUDF()` under `BenchUtils.RapidsUdfName` with the correct Spark return type.
-   - Run the mirror SQL invoking the UDF.
-
-Both `executeCpu` and `executeGpu` share the SparkSession — the toggle is a runtime config, so the plugin must be loaded in the session (`run_spark_benchmark.sh` already does this).
-
-## Step 2: Validate
-
-Run the small validation mode — it generates a tiny dataset and calls both `executeCpu` and `executeGpu` end-to-end to sanity-check the implementations:
 ```bash
-chmod +x *.sh
-./run_gen_data.sh --rows 1000 --validate
+mvn package -pl datagen -Dbuildver=357 -DskipTests
 ```
 
-If validation fails, read the error output and fix `BenchUtils`. Typical causes: missing `bench_table` temp view, wrong return type in `spark.udf.register`, or column name mismatches between `generateSyntheticData` and the SQL query.
+Output: `datagen/target/datagen_2.12-<version>-spark357.jar`. Export it for the next steps:
 
-## Step 3: Spark Benchmark
-
-### Generate benchmark data (10M rows):
 ```bash
-./run_gen_data.sh --rows 10000000
+export DATAGEN_JAR=$(ls -t $(git rev-parse --show-toplevel)/datagen/target/datagen_2.12-*-spark357.jar | head -n1)
+export SPARK_HOME=/opt/spark-3.5.7
 ```
 
-### Run Spark benchmarks (single-JVM, shared plugin, toggle flips at runtime):
-```bash
-# CPU run (executeCpu sets spark.rapids.sql.enabled=false)
-./run_spark_benchmark.sh --mode cpu --data-path data/bench_data_10000000_rows.parquet
+The glob filters on `spark357` so a stale `spark330`/`spark341` jar in `target/` won't match. `ls -t` picks the newest if multiple `spark357` builds exist — but if you're unsure, `rm datagen/target/*.jar && mvn package ...` is the safe reset.
 
-# GPU run (executeGpu sets spark.rapids.sql.enabled=true)
-./run_spark_benchmark.sh --mode gpu --data-path data/bench_data_10000000_rows.parquet
+## Step 2: Fill in `bench/gen_data.sh` and `bench/spark_bench.sh`
+
+Fill both case lists now — they must agree on labels, and filling them together avoids a later scramble in operator-backport Step 6.
+
+**`bench/gen_data.sh`** — replace `cases: Seq[(String, String)] = ???` with one `(label, ddl)` entry per advertised type. The DDL describes ALL input columns of the operator (binary `nvl(a, b)` over `long` → `"a long, b long"`). The `label` becomes the Parquet subdirectory name — use filename-safe lowercase (`long`, `string`, `decimal_38`, `array_long`, `struct_2`, ...).
+
+**`bench/spark_bench.sh`** — replace `cases: Seq[(String, String)] = ???` with one `(label, sqlFragment)` entry per case. Labels MUST match `gen_data.sh`. The fragment is the projection list inside `SELECT <fragment> FROM bench` — wrap the operator in `COUNT(...)` to force row-wise work (the example in the file shows this).
+
+> The example in `bench/gen_data.sh` (long / string / decimal_38 / array_long / struct_2) is a **representative subset**, not the full surface. Many operators advertise more types (boolean, byte, short, int, float, double, date, timestamp, binary, map, ...). Consult the operator's `ExprChecks` entry captured in operator-gen-test Step 1.3 and add any missing types.
+
+Match the column NAMES to whatever `<OperatorName>RapidsUDF.evaluateColumnar(...)` expects positionally. The microbench reads them by index; `spark_bench.sh` references them by name in its SQL.
+
+> Defaults: `BENCH_DATA_DIR=./data` so the parquet output lands where `MicroBenchRunner` reads from. Leave this alone for the optimize loop. The PR-repro override (an absolute path like `/tmp/<snake_name>_bench`) is documented in operator-backport.
+
+## Step 3: Generate Parquet datasets
+
+```bash
+chmod +x bench/gen_data.sh
+./bench/gen_data.sh                              # 10M rows per case (default)
+BENCH_ROWS=50000000 ./bench/gen_data.sh          # larger sweep
 ```
 
-Results are saved as JSON under `results/`. Compare the `e2e_runtime` fields to report Spark-level speedup.
+Result: one Parquet directory per case under `data/<label>/`. Sanity-check the layout:
 
-## Step 4: GPU Microbenchmark
-
-> Unlike the UDF workflow, the microbenchmark here is **GPU-only** — a Spark SQL operator cannot be invoked in isolation on an in-memory cuDF `Table`, so there is no CPU analogue to time here. Use the Spark benchmark from Step 3 for CPU-vs-GPU comparisons.
-
-### 4a. Implement `MicroBenchRunner.executeGpu`
-
-Open `src/main/scala/com/udf/bench/MicroBenchRunner.scala` and fill in the single TODO: instantiate `<OperatorName>RapidsUDF` and call `evaluateColumnar(numRows, table.getColumn(i), ...)` with the operator's input columns.
-
-Remember to skip the `id` column in `table` when mapping to operator args.
-
-### 4b. Run the microbenchmark
-
-Reuse the Parquet dataset from Step 3:
 ```bash
-./run_micro_benchmark.sh --data-path data/bench_data_10000000_rows.parquet --rows 10000000
+ls data/
+du -sh data/*
 ```
 
-The specified number of rows is coalesced into a single cuDF table. Large table sizes (>1 GB) are typically needed to amortize kernel launch costs and surface real GPU performance.
+Expected size per case: ~80MB–1GB depending on type and row count. Tens-of-millions-of-rows datasets are typical to amortize kernel launch costs.
 
-Output shows min / median `evaluateColumnar` wall time in ms. Record this as the microbenchmark **baseline** — it is the number the optimize-cudf skill will try to beat.
+## Step 4: Implement `MicroBenchRunner.executeGpu`
+
+Open `src/main/scala/com/udf/bench/MicroBenchRunner.scala` and fill the single TODO: instantiate `<OperatorName>RapidsUDF` and call `evaluateColumnar(numRows, table.getColumn(0), table.getColumn(1), ...)` with the operator's input columns in the same order as the columns listed in `bench/gen_data.sh`'s DDL.
+
+Note: `bench/gen_data.sh` writes only the operator's input columns (no synthetic `id` column), so column indices start at 0.
+
+## Step 5: Run the microbenchmark across all types
+
+Default invocation sweeps every subdirectory of `data/` in a single JVM (one RMM pool, one cuDF native load — much faster than per-case `mvn` startups):
+
+```bash
+chmod +x run_micro_benchmark.sh
+./run_micro_benchmark.sh --rows 10000000
+```
+
+Output: per-case `[label] GPU | rows | median ... | min ...` lines plus a final summary table. Record every per-case median/min as the **microbenchmark baselines** — operator-optimize-cudf will try to beat each one.
+
+> **Sanity-check the numbers before trusting them.** A median in the low tens of microseconds on 10M rows (~1 ns/row) is below realistic GPU memory-bandwidth throughput — something isn't doing real work. For null-handling operators the most common cause is `DBGen`'s default of 0% nulls (see `datagen/README.md` §Nulls), which leaves the operator's null branch unexercised. To inject nulls, edit the heredoc in `bench/gen_data.sh` to capture the table handle and call `setNullProbability` before `toDF`, e.g.
+>
+> ```scala
+> val t = DBGen().addTable("data", ddl, numRows)
+> t("a").setNullProbability(0.3); t("b").setNullProbability(0.3)
+> t.toDF(spark).write.mode("overwrite").parquet(path)
+> ```
+>
+> then regenerate and re-run Step 5.
+
+For nsys profiling, narrow to one case (mixing cases in a single nsys report is rarely useful):
+
+```bash
+./run_micro_benchmark.sh --data-path data/long --rows 10000000 --profile
+```
 
 ## Output
 
-Upon successful completion:
-- Benchmark utilities: `src/main/scala/com/udf/bench/BenchUtils.scala`
-- GPU microbenchmark: `src/main/scala/com/udf/bench/MicroBenchRunner.scala`
-- Generated data: `data/`
-- Spark benchmark results: `results/*.json`
-- Microbenchmark baseline printed to stdout (and any `results/microbench_*.nsys-rep` if `--profile` was used)
+- Filled `bench/gen_data.sh` (the case list defines the type sweep for the rest of the workflow and is reused verbatim by operator-backport's PR repro snippet)
+- Per-type Parquet datasets under `data/<label>/`
+- Implemented `src/main/scala/com/udf/bench/MicroBenchRunner.scala`
+- Per-type microbenchmark baselines (median / min ms) recorded for operator-optimize-cudf
+- Optional `results/microbench_*.nsys-rep` reports
 
 These outputs are required for **Step 3: Optimize**.

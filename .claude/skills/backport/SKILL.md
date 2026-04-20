@@ -13,7 +13,8 @@ model: inherit
 - [ ] Step 3: Apply the minimal diff (and update call sites if signatures changed)
 - [ ] Step 4: Build the **optimized** dist jar (scalastyle runs inline via `verify`)
 - [ ] Step 5: Unit + integration tests
-- [ ] Final: Summarize with both jar paths; do **not** auto-commit
+- [ ] Step 6: Spark-level A/B benchmark (baseline vs. optimized jar) + emit PR-repro variant
+- [ ] Final: Summarize with both jar paths + A/B numbers + paths to the two repro scripts; do **not** auto-commit
 
 ## Prerequisites
 
@@ -36,11 +37,12 @@ Before editing anything, build a **baseline** dist jar at `HEAD` so the user can
 
 ```bash
 mvn clean verify -DskipTests -Dbuildver=357
+mkdir -p opt/<OperatorName>/jars
 cp dist/target/rapids-4-spark_2.12-<version>-cuda12.jar \
-   dist/target/rapids-4-spark_2.12-<version>-cuda12.baseline.jar
+   opt/<OperatorName>/jars/rapids-4-spark_2.12-<version>-cuda12.baseline.jar
 ```
 
-Copy is required — the next build step overwrites `dist/target/` contents. Record the baseline path for the summary.
+> **Why copy out of `dist/target/`:** Step 4 runs `mvn clean verify` again, which deletes `dist/target/` in its entirety — renaming the file in place does not save it. Stash both jars under `opt/<OperatorName>/jars/` (outside any maven build tree, alongside the bench scripts that consume them in Step 6). Record the stashed path for the summary.
 
 ## Step 3: Apply the Minimal Diff
 
@@ -50,17 +52,25 @@ Preserve the file's license header, imports, and ordering. No reformatting. Upda
 
 ## Step 4: Build the Optimized Jar
 
-Rebuild the dist jar for Spark 3.5.7 with the changes applied, and save a labeled copy alongside the baseline. The `verify` phase runs scalastyle via antrun, so this single command covers both style checks and the build — fix any reported violations and rerun:
+Rebuild the dist jar for Spark 3.5.7 with the changes applied, and immediately copy it to the same stash directory as the baseline. The `verify` phase runs scalastyle via antrun, so this single command covers both style checks and the build — fix any reported violations and rerun:
 
 ```bash
 mvn clean verify -DskipTests -Dbuildver=357
 cp dist/target/rapids-4-spark_2.12-<version>-cuda12.jar \
-   dist/target/rapids-4-spark_2.12-<version>-cuda12.optimized.jar
+   opt/<OperatorName>/jars/rapids-4-spark_2.12-<version>-cuda12.optimized.jar
+```
+
+After this step you should see both jars side-by-side in the stash:
+
+```bash
+ls -lh opt/<OperatorName>/jars/
+# rapids-4-spark_2.12-<ver>-cuda12.baseline.jar
+# rapids-4-spark_2.12-<ver>-cuda12.optimized.jar
 ```
 
 If Step 1 found multiple shim copies, also build at least one representative `buildver` from each to confirm they compile. `./build/buildall --profile=noSnapshots` is reserved for pre-merge broad coverage — don't run it every loop.
 
-Record both the baseline and optimized jar paths for the summary.
+Record both stashed jar paths for the summary.
 
 ## Step 5: Unit + Integration Tests
 
@@ -69,9 +79,17 @@ mvn test -pl tests                                       # unit tests
 mvn test -pl tests -Dsuites=<FullyQualifiedSuiteName>    # scoped to operator's suite, if any
 ```
 
-Integration tests live in `integration_tests/src/main/python/` and consume the optimized dist jar from Step 4 automatically. `run_pyspark_from_build.sh` **requires `SPARK_HOME` to be set** — it will exit otherwise, and it does not auto-detect. Point it at the 3.5.7 install so the Spark runtime matches the compile-time `buildver=357` shim, then find the relevant pytest file for the operator's SQL function (e.g. `conditionals_test.py` for `coalesce`/`nvl`) and run it:
+Integration tests live in `integration_tests/src/main/python/` and consume whatever is currently in `dist/target/` — at this point that's the optimized jar from Step 4. Do not run `mvn clean` between Step 4 and the end of Step 5 (the stashed copies under `opt/<OperatorName>/jars/` survive a clean, but `run_pyspark_from_build.sh` reads from `dist/target/`).
+
+Two environmental requirements:
+
+- **Activate the `spark-rapids` conda env** — `run_pyspark_from_build.sh` shells out to `python` / `pyspark` / `pytest`; the env provides those plus the project's pinned test deps.
+- **Set `SPARK_HOME`** — the script exits if it's unset, and it does not auto-detect. Point it at the 3.5.7 install so the Spark runtime matches the compile-time `buildver=357` shim.
+
+Then find the relevant pytest file for the operator's SQL function (e.g. `conditionals_test.py` for `coalesce`/`nvl`) and run it:
 
 ```bash
+conda activate spark-rapids
 cd integration_tests
 export SPARK_HOME=/opt/spark-3.5.7
 TEST=src/main/python/<file>.py::<test_name> ./run_pyspark_from_build.sh
@@ -81,23 +99,61 @@ Add `--delta_lake` / `--iceberg` if the operator touches those paths. If the use
 
 On failure, triage: a GPU-vs-CPU mismatch means revert and return to `operator-optimize-cudf`; a legitimate test update (e.g. a fallback test that no longer triggers because the optimization broadens GPU coverage) is fine — flag it in the summary.
 
+> **If you edit the plugin diff to fix a test (Step 3 was not enough — e.g. you tightened null handling or added a type guard):** mirror the change back into `opt/<OperatorName>/src/main/scala/com/udf/<OperatorName>RapidsUDF.scala` and re-run the microbench sweep + comparison test from `opt/<OperatorName>/`:
+>
+> ```bash
+> cd opt/<OperatorName>
+> mvn test -q -Dsuites=com.udf.SqlOperatorComparisonTest
+> ./run_micro_benchmark.sh --rows 10000000 | tee results/post_backport_fix.txt
+> ```
+>
+> Use the new per-case medians (not the operator-optimize-cudf numbers) for the final summary — the original numbers measured a different implementation. Then redo Step 4 so the `*.optimized.jar` reflects the fix, and rerun Step 5 to confirm. If the post-fix microbench shows the change no longer beats baseline, surface that to the user before proceeding to Step 6.
+
+## Step 6: Spark-Level A/B Benchmark
+
+End-to-end Spark numbers using the actual plugin jars — this is the headline performance result for the PR. Runs `bench/spark_bench.sh` (the same self-contained script that operator-benchmark sets up) twice in one invocation, once per jar.
+
+Prerequisites:
+- `data/<label>/` Parquet datasets exist in `opt/<OperatorName>/` (from operator-benchmark Step 3 — regenerate with `./bench/gen_data.sh` if missing).
+- `bench/spark_bench.sh`'s `cases` list filled in (labels match `data/`'s subdirs). If you skipped this in operator-benchmark, fill it now.
+- `bench/gen_data.sh`'s `BENCH_DATA_DIR` and `bench/spark_bench.sh`'s `BENCH_DATA_DIR` agree (default `./data` works for both).
+
+Run the A/B from inside the optimize project, pointing at the stashed jars from Steps 2 and 4:
+
+```bash
+cd opt/<OperatorName>
+export SPARK_HOME=/opt/spark-3.5.7
+./bench/spark_bench.sh \
+    jars/rapids-4-spark_2.12-<version>-cuda12.baseline.jar \
+    jars/rapids-4-spark_2.12-<version>-cuda12.optimized.jar \
+    | tee results/spark_bench_ab.log
+```
+
+If the A/B shows no improvement (or a regression) at Spark scale despite a clean libcudf win in the optimize loop, that's a meaningful finding — note it for the user. Common causes: the operator is not the bottleneck of the test query (Spark/IO dominates), or AQE/codegen masks the libcudf delta.
+
+The two bench scripts are themselves the PR-repro artifacts. Before pasting into the PR description, set `BENCH_DATA_DIR` to an absolute path in both scripts and use absolute jar paths in the cited `spark_bench.sh` invocation.
+
 ## Final: Summarize (do NOT commit)
 
 Report:
 1. Files changed (note single-copy vs. multi-shim).
 2. Call sites updated.
-3. **Baseline jar path** (`*.baseline.jar`, from Step 2) + **optimized jar path** (`*.optimized.jar`, from Step 4) — side-by-side, so the user can A/B test.
+3. **Stashed baseline + optimized jar paths** under `opt/<OperatorName>/jars/` (from Steps 2 and 4) — these survive subsequent `mvn clean` runs.
 4. Additional `buildver`s built, if any.
 5. Unit / integration test status.
-6. Speedup carried from `operator-optimize-cudf`.
-7. Open questions for the user.
+6. Microbenchmark speedup (per-type, geomean) — note explicitly whether these are the original `operator-optimize-cudf` numbers or post-backport-fix re-runs (see Step 5's edit-then-remeasure rule).
+7. **Spark-level A/B results from Step 6** (per-type baseline vs. optimized wall time, geomean speedup, log path).
+8. **PR-ready repro scripts**: `opt/<OperatorName>/bench/gen_data.sh` and `opt/<OperatorName>/bench/spark_bench.sh` — the same scripts that produced the numbers, paste-ready into the PR description after the two in-place edits called out in Step 6 (absolute `BENCH_DATA_DIR` and absolute jar paths in the cited invocation).
+9. Open questions for the user.
 
 **Do not `git commit` or `git push`.** Committing (with `-s` for DCO) and PR authoring (including `[databricks]` / `[skip ci]` tags, no-rebase-during-review) are the user's call per `AGENTS.md`.
 
 ## Output
 
 - Modified plugin source file(s) (and any updated call sites).
-- **Baseline jar** at `dist/target/rapids-4-spark_2.12-<version>-cuda12.baseline.jar` (pre-change, Spark 3.5.7).
-- **Optimized jar** at `dist/target/rapids-4-spark_2.12-<version>-cuda12.optimized.jar` (post-change, Spark 3.5.7).
+- **Baseline jar** at `opt/<OperatorName>/jars/rapids-4-spark_2.12-<version>-cuda12.baseline.jar` (pre-change, Spark 3.5.7).
+- **Optimized jar** at `opt/<OperatorName>/jars/rapids-4-spark_2.12-<version>-cuda12.optimized.jar` (post-change, Spark 3.5.7).
 - Green `mvn verify` (scalastyle + build) and passing unit + integration tests.
+- Spark-level A/B benchmark log at `opt/<OperatorName>/results/spark_bench_ab.log`.
+- Self-contained repro scripts at `opt/<OperatorName>/bench/gen_data.sh` and `opt/<OperatorName>/bench/spark_bench.sh` (paste-ready into the PR description after making `BENCH_DATA_DIR` and jar paths absolute).
 - Summary ready for user review.

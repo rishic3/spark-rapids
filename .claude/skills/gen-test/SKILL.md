@@ -48,13 +48,14 @@ Derive `<OperatorName>` (CamelCase, e.g. `GpuUpper`) and `<snake_name>` (e.g. `g
 3. Identify the operator's Catalyst arity and Spark input/output types. Needed to:
    - Pick the right `args: ColumnVector*` indexing in the RapidsUDF.
    - Pass the correct return `DataType` to `spark.udf.register`.
+   - **Capture the full advertised type surface** by looking up the operator's `ExprChecks` (or `ExecChecks`) entry in `sql-plugin/src/main/scala/com/nvidia/spark/rapids/GpuOverrides.scala`. This is the contract the plugin promises Spark — every type listed there (including `TypeSig.ARRAY`, `TypeSig.STRUCT`, `TypeSig.MAP`, `TypeSig.BINARY`, `.nested()`, decimal precisions, etc.) must be exercised by the test data in Step 3. Optimizations that work for primitives but break on, say, struct columns are common and pass primitive-only tests silently — record the full set now so the test data covers it.
 4. **If the operator does not fit the templates** — e.g. it is variadic (`GpuCoalesce`, `GpuGreatest`, `GpuConcat`), does not implement `doColumnar` (evaluates directly on a `ColumnarBatch`), operates on nested types in ways the `args: ColumnVector*` signature cannot express, or requires scalar-literal fast paths that disappear behind a `RapidsUDF` registration — **stop and surface this to the user before extracting**. Describe the mismatch and what you would have to simplify or simulate; let the user decide whether to proceed, narrow the scope, or pick a different target. Do not try to shoehorn a bad fit into the template.
 
 ## Step 2: Set Up the Project
 
 Copy the template project:
 ```bash
-cp -r .claude/skills/operator/gen-test/templates <project_root>/opt/<OperatorName>/
+cp -r .claude/skills/gen-test/templates <project_root>/opt/<OperatorName>/
 ```
 
 This provides a complete Maven project with all test and benchmark infrastructure.
@@ -62,6 +63,8 @@ This provides a complete Maven project with all test and benchmark infrastructur
 ## Step 3: Seed Test Data
 
 Robust test data is essential — a weak test won't catch regressions during optimization.
+
+> **Test data ≠ benchmark data.** This step seeds a small (10s–100s of rows) hand-curated DataFrame inside the test, focused on edge cases and full type coverage for correctness. The bulk Parquet datasets used by microbenchmarks and Spark-level A/B are generated separately in **operator-benchmark** Step 3 via `DBGen` (one Parquet directory per advertised type). Both datasets must agree on the operator's input schema (column names + types per type case), but the contents are otherwise independent.
 
 **First, check the repo for existing coverage:**
 
@@ -77,7 +80,7 @@ Robust test data is essential — a weak test won't catch regressions during opt
 
 If you find relevant cases, port their inputs and edge cases into `createTestData`. If nothing applies (or the existing coverage is thin), construct a robust dataset yourself.
 
-**Robustness checklist — the `createTestData` DataFrame MUST cover:**
+**Robustness checklist — `createTestData` returns `Seq[DataFrame]`, one DataFrame per advertised type. Every DataFrame MUST cover:**
 - Nulls in every nullable input column.
 - Empty / zero-length values where meaningful (empty strings, empty arrays).
 - Boundary values for each input type (min/max, zero, 1, -1, NaN/Infinity for floats).
@@ -85,12 +88,28 @@ If you find relevant cases, port their inputs and edge cases into `createTestDat
 - Unicode / multi-byte content for strings.
 - Inputs that hit every branch the extracted cuDF code can reach (and **only** those — do not include inputs that would take a code path you did not extract).
 - Stable ordering via a leading `id: Int` column.
+- Correct Scala types when building `Row(...)`s for nested columns: **`Seq[T]`** for `ArrayType` (NOT `java.util.List` — Spark's encoder throws `ClassCastException`), **`Row(...)`** for `StructType`, **`new java.math.BigDecimal(...)`** for `DecimalType`.
+
+**Across the list, you MUST cover every type the operator's `ExprChecks` advertises** — one DataFrame per type. The per-DataFrame test loop makes this structurally enforced rather than aspirational; skipping a type here is the same gap that lets primitive-only optimizations silently break on nested types.
 
 ## Step 4: Extract the cuDF Logic
 
 Create `src/main/scala/com/udf/<OperatorName>RapidsUDF.scala`.
 
 ### 4a. File skeleton
+
+Use Java `UDF<N>` (from `org.apache.spark.sql.api.java`). Because `UDF<N>[T1, ..., R]` binds a single `(T1, ..., R)` triple, one subclass cannot cover multiple advertised types. Put the cuDF work on a shared trait and create one thin `UDF<N>` subclass per advertised type — cuDF's `evaluateColumnar` dispatches on the column's runtime `DType`, not on the Java generics.
+
+Use **boxed** Java types (`java.lang.Long`, not `Long`) so nulls survive Spark ↔ Java boundary. Mapping for the common advertised types:
+
+| Spark type     | UDF type parameter          |
+| -------------- | --------------------------- |
+| `LongType`     | `java.lang.Long`            |
+| `IntegerType`  | `java.lang.Integer`         |
+| `StringType`   | `String`                    |
+| `DecimalType`  | `java.math.BigDecimal`      |
+| `ArrayType(T)` | `java.util.List[<boxed T>]` |
+| `StructType`   | `org.apache.spark.sql.Row`  |
 
 ```scala
 /*
@@ -102,22 +121,27 @@ package com.udf
 import ai.rapids.cudf._
 import com.nvidia.spark.RapidsUDF
 import com.udf.Arm.{withResource, closeOnExcept}
+import org.apache.spark.sql.Row
+import org.apache.spark.sql.api.java.UDF<N>
 
-// Extend a FunctionN matching the operator's arity (required for spark.udf.register).
-// Reference: tests/src/test/scala/com/nvidia/spark/rapids/tests/udf/scala/URLEncode.scala
-class <OperatorName>RapidsUDF
-    extends Function<N>[<T1>, ..., <R>]
-    with RapidsUDF
-    with Serializable {
-
-  override def apply(<x1>: <T1>, ..., <xN>: <TN>): <R> =
-    throw new UnsupportedOperationException("CPU row-by-row path not used")
-
+// evaluateColumnar is polymorphic over cuDF type — put it on a shared trait.
+trait <OperatorName>RapidsUDFBase extends RapidsUDF with Serializable {
   override def evaluateColumnar(numRows: Int, args: ColumnVector*): ColumnVector = {
+    require(args.length == <N>, s"expects <N> columns, got ${args.length}")
     // TODO: Paste the extracted cuDF API call sequence here, verbatim.
     ???
   }
 }
+
+// One thin subclass per advertised type (only for the Java UDF<N> typing —
+// the `call` body is never actually invoked). See operator's ExprChecks.
+class <OperatorName>LongUDF
+    extends UDF<N>[java.lang.Long, ..., java.lang.Long]
+    with <OperatorName>RapidsUDFBase {
+  override def call(<args>): java.lang.Long =
+    throw new UnsupportedOperationException("CPU row-by-row path not used")
+}
+// ... one subclass per advertised type (String, Decimal, ArrayLong, Struct, ...)
 ```
 
 ### 4b. Extraction rules
@@ -135,21 +159,17 @@ Consult `.claude/skills/udf/convert-to-cudf/references/RAPIDS_UDF.md` for the fu
 
 ## Step 5: Fill in `SqlOperatorComparisonTest`
 
-Open `src/test/scala/com/udf/SqlOperatorComparisonTest.scala` and implement the four TODO methods:
+Implement the four TODO methods in `src/test/scala/com/udf/SqlOperatorComparisonTest.scala` — the in-file docstrings document each method's contract and show worked examples. The template auto-generates one `test(...)` per DataFrame returned by `createTestData()`.
 
-- `createTestData()` — return the DataFrame from Step 3.
-- `cpuSqlQuery()` — the SQL expression under test, over `test_table` (e.g. `"SELECT id, upper(s) AS result FROM test_table"`).
-- `gpuSqlQuery(udfName)` — the mirror query invoking the registered UDF (e.g. `s"SELECT id, $udfName(s) AS result FROM test_table"`). The output schema must match `cpuSqlQuery()`.
-- `registerRapidsUDF(udfName)` — call `spark.udf.register(udfName, new <OperatorName>RapidsUDF(), <SparkReturnType>)`.
+Two cross-cutting invariants the docstrings don't restate:
 
-**Critical:**
-- The test toggles `spark.rapids.sql.enabled` at runtime in a single SparkSession. The skill asserts both that the CPU plan contains no `Gpu*` nodes and that the GPU plan does.
-- Do not hardcode expected output values — the CPU SQL run is the source of truth.
+- The CPU SQL run is the source of truth — never hardcode expected outputs.
+- The body toggles `spark.rapids.sql.enabled` per-case in one `SparkSession`; the assertions pin the plan side (CPU plan free of `Gpu*` nodes, GPU plan contains them). If your `gpuSqlQuery` or `registerRapidsUDF` doesn't actually flip the plan, the plan assertion will fire before the value comparison.
 
 ## Step 6: Run the Test
 
 ```bash
-cd <OperatorName>
+cd opt/<OperatorName>
 mvn test -q -Dsuites=com.udf.SqlOperatorComparisonTest
 ```
 
