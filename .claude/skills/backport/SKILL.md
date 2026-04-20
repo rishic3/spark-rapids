@@ -74,9 +74,19 @@ Record both stashed jar paths for the summary.
 
 ## Step 5: Unit + Integration Tests
 
+**Scope unit tests to the operator.** `mvn test -pl tests` runs every suite under the `tests/` module (thousands of tests, many minutes) — avoid it unless nothing targeted exists. Locate the operator-specific suite(s) first:
+
 ```bash
-mvn test -pl tests                                       # unit tests
-mvn test -pl tests -Dsuites=<FullyQualifiedSuiteName>    # scoped to operator's suite, if any
+# Suites that reference the operator's GPU class:
+rg -l "Gpu<OperatorName>" tests/src/test/scala
+# Suites named after the SQL function (e.g. "nvl", "coalesce"):
+rg -l -i "class .*<sql_function_name>.*Suite" tests/src/test/scala
+```
+
+Then run only those suites:
+
+```bash
+mvn test -pl tests -Dbuildver=357 -DwildcardSuites=<FQN>[,<FQN>...]
 ```
 
 Integration tests live in `integration_tests/src/main/python/` and consume whatever is currently in `dist/target/` — at this point that's the optimized jar from Step 4. Do not run `mvn clean` between Step 4 and the end of Step 5 (the stashed copies under `opt/<OperatorName>/jars/` survive a clean, but `run_pyspark_from_build.sh` reads from `dist/target/`).
