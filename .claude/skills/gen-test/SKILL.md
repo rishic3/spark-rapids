@@ -80,6 +80,8 @@ Robust test data is essential — a weak test won't catch regressions during opt
 
 If you find relevant cases, port their inputs and edge cases into `createTestData`. If nothing applies (or the existing coverage is thin), construct a robust dataset yourself.
 
+> Keep a running list of the test files you reviewed and which one(s) you adapted into `createTestData` (e.g. `integration_tests/src/main/python/string_test.py::test_upper_ascii` → basis for the string case). This list is a required output of the skill — see [Output](#output) — capture it as you hunt rather than re-deriving it later.
+
 **Robustness checklist — `createTestData` returns `Seq[DataFrame]`, one DataFrame per advertised type. Every DataFrame MUST cover:**
 - Nulls in every nullable input column.
 - Empty / zero-length values where meaningful (empty strings, empty arrays).
@@ -195,5 +197,9 @@ Upon successful completion:
 - Project directory: `<project_root>/opt/<OperatorName>/`
 - Extracted RapidsUDF: `src/main/scala/com/udf/<OperatorName>RapidsUDF.scala`
 - Comparison test: `src/test/scala/com/udf/SqlOperatorComparisonTest.scala`
+- **Test-coverage summary** (reported to the user at the end of the skill): the list of in-repo test files that exercise this operator (from the Step 3 hunt), with the one(s) adapted into `createTestData` explicitly marked. Example:
+  - `integration_tests/.../string_test.py::test_upper_ascii` — **adapted** (basis for the string case)
+  - `integration_tests/.../string_test.py::test_upper_unicode` — reviewed, edge cases incorporated
+  - `tests/.../GpuUpperSuite.scala` — reviewed, not adapted (narrower than our per-type sweep)
 
 These outputs are required for **Step 2: Benchmark**.
