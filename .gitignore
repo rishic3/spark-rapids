@@ -40,3 +40,4 @@ cudf_log.txt
 build/*.class
 
 opt/
+jars/
