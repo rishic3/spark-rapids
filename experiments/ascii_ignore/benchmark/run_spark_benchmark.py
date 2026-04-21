@@ -31,10 +31,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
 SRC_DIR = PROJECT_DIR / "src"
 HOSTNAME = socket.gethostname()
+DEFAULT_THREADS = 16
 
 sys.path.insert(0, str(SRC_DIR))
 
 from udf_registry import available_names, get_config  # type: ignore[import-not-found]
+from history_server_client import fetch_op_time  # type: ignore[import-not-found]
 
 
 BASE_SPARK_CONFIGS: Dict[str, str] = {
@@ -66,7 +68,7 @@ STANDALONE_CONFIGS: Dict[str, str] = {
 }
 
 LOCAL_CONFIGS: Dict[str, str] = {
-    "spark.master": "local[16]",
+    "spark.master": f"local[{DEFAULT_THREADS}]",
     "spark.driver.memory": "16g",
     "spark.driver.extraJavaOptions": "-Dai.rapids.cudf.nvtx.enabled=true",
 }
@@ -139,6 +141,19 @@ _CPU_TIMING_ZERO = {
 }
 
 
+# (mode) -> (module_suffix, udf_suffix, is_gpu)
+# - mode        : user-facing --mode value
+# - module_suffix: appended to {cfg.name} to build the python module name
+# - udf_suffix  : appended to {cfg.name} to build the UDF + make_timed_ identifier
+# - is_gpu      : whether to use GPU timing accumulator schema
+MODE_SPEC: Dict[str, tuple] = {
+    "cpu":       ("",           "pandas",    False),
+    "gpu":       ("_gpu",       "gpu",       True),
+    "cpu-arrow": ("_arrow",     "arrow",     False),
+    "gpu-arrow": ("_gpu_arrow", "gpu_arrow", True),
+}
+
+
 def run_single_benchmark(
     mode: str,
     cluster: str,
@@ -147,16 +162,17 @@ def run_single_benchmark(
     extra_spark_configs: Dict[str, str],
     coalesce: Optional[int] = None,
     udf_key: str = "ascii_ignore",
+    history_server_port: Optional[int] = 18080,
 ) -> float:
     cfg = get_config(udf_key)
 
-    if mode == "cpu":
-        udf_name = f"{cfg.name}_pandas"
-        udf_mod = importlib.import_module(cfg.name)
-    else:
-        udf_name = f"{cfg.name}_gpu"
-        udf_mod = importlib.import_module(f"{cfg.name}_gpu")
+    if mode not in MODE_SPEC:
+        raise ValueError(f"Unknown mode '{mode}'. Expected one of: {list(MODE_SPEC)}")
+    module_suffix, udf_suffix, is_gpu = MODE_SPEC[mode]
 
+    module_name = f"{cfg.name}{module_suffix}"
+    udf_name = f"{cfg.name}_{udf_suffix}"
+    udf_mod = importlib.import_module(module_name)
     udf_func = getattr(udf_mod, udf_name)
 
     app_name = f"{udf_name}_{Path(data_path).stem}_{time.strftime('%Y%m%d_%H%M%S')}"
@@ -174,21 +190,12 @@ def run_single_benchmark(
     print(f"Spark Arrow maxRecordsPerBatch: {spark.conf.get('spark.sql.execution.arrow.maxRecordsPerBatch')}")
     output_path = str(SCRIPT_DIR / f"_tmp_{udf_name}_output")
 
-    timing_acc = None
-    if mode == "cpu":
-        timing_acc = spark.sparkContext.accumulator(
-            dict(_CPU_TIMING_ZERO), _DictAccumulatorParam()
-        )
-        make_timed = getattr(udf_mod, f"make_timed_{cfg.name}_pandas")
-        udf_func = make_timed(timing_acc)
-        udf_name = f"{cfg.name}_pandas"
-    elif mode == "gpu":
-        timing_acc = spark.sparkContext.accumulator(
-            dict(_GPU_TIMING_ZERO), _DictAccumulatorParam()
-        )
-        make_timed = getattr(udf_mod, f"make_timed_{cfg.name}_gpu")
-        udf_func = make_timed(timing_acc)
-        udf_name = f"{cfg.name}_gpu"
+    timing_zero = _GPU_TIMING_ZERO if is_gpu else _CPU_TIMING_ZERO
+    timing_acc = spark.sparkContext.accumulator(
+        dict(timing_zero), _DictAccumulatorParam()
+    )
+    make_timed = getattr(udf_mod, f"make_timed_{cfg.name}_{udf_suffix}")
+    udf_func = make_timed(timing_acc)
 
     try:
         register_udf(spark, udf_name, udf_func)
@@ -204,7 +211,7 @@ def run_single_benchmark(
         elapsed = time.time() - start
     finally:
         shutil.rmtree(output_path, ignore_errors=True)
-        if timing_acc is not None and mode == "cpu":
+        if timing_acc is not None and not is_gpu:
             t = timing_acc.value
             print("[UDF_TIMING]")
             print(f"  {'batches:':38s} {t['batches']:10d}")
@@ -214,7 +221,7 @@ def run_single_benchmark(
             per_row_us = (t["total_compute_s"] * 1e6 / t["rows"]) if t["rows"] > 0 else 0.0
             print(f"  {'compute per batch:':38s} {per_batch_s:10.6f}s")
             print(f"  {'compute per row:':38s} {per_row_us:10.3f}us")
-        elif timing_acc is not None and mode == "gpu":
+        elif timing_acc is not None and is_gpu:
             t = timing_acc.value
             warm_batches = t["batches"] - t["cold_batches"]
             warm_h2d_per_batch = (
@@ -244,24 +251,49 @@ def run_single_benchmark(
             print(f"  {'estimated pure cold init:':38s} {est_pure_cold_init:10.4f}s")
         spark.stop()
 
+    if history_server_port is not None:
+        node_name = "GpuArrowEvalPython"
+        op = fetch_op_time(app_name=app_name, node_name=node_name, port=history_server_port)
+        print(f"[HISTORY_SERVER] app='{app_name}' node='{node_name}'")
+        if op is None:
+            print(
+                f"  (no op time found on port {history_server_port}; is the history "
+                f"server running and reading {spark_configs.get('spark.eventLog.dir')}?)"
+            )
+        else:
+            print(
+                f"  op time: {op['total']:.4f}s "
+                f"({op['min']:.4f}, {op['med']:.4f}, {op['max']:.4f})"
+            )
+
     return elapsed
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark UDF transfer overhead in Spark-RAPIDS")
-    parser.add_argument("mode", choices=["cpu", "gpu"], help="Mode to run: cpu or gpu")
+    parser.add_argument(
+        "--mode",
+        choices=list(MODE_SPEC.keys()),
+        help="Mode to run: cpu | gpu | cpu-arrow | gpu-arrow",
+    )
     parser.add_argument(
         "--udf",
         default="ascii_ignore",
         choices=available_names(),
         help="UDF to benchmark (default: ascii_ignore)",
     )
-    parser.add_argument("--cluster", choices=["standalone", "local"], default="standalone",
-                        help="Cluster mode: 'standalone' (default) or 'local'")
+    parser.add_argument("--cluster", choices=["standalone", "local"], default="local",
+                        help="Cluster mode: 'standalone' or 'local' (default)")
     parser.add_argument("--data-path", required=True, help="Input parquet data path")
     parser.add_argument("--rapids-jar-path", required=True, help="Path to RAPIDS plugin jar")
     parser.add_argument("--spark-conf", action="append", default=[], help="Spark configs in key=value format")
     parser.add_argument("--coalesce", type=int, default=None, help="Number of partitions to coalesce to")
+    parser.add_argument(
+        "--history-server-port",
+        type=int,
+        default=18080,
+        help="Spark history server port for op-time lookup (default: 18080). Set to 0 to disable.",
+    )
     args = parser.parse_args()
 
     data_file = Path(args.data_path).resolve()
@@ -281,8 +313,10 @@ def main() -> None:
         extra_spark_configs=extra_spark_configs,
         coalesce=args.coalesce,
         udf_key=args.udf,
+        history_server_port=args.history_server_port or None,
     )
-    udf_label = f"{args.udf}_pandas" if args.mode == "cpu" else f"{args.udf}_gpu"
+    _, udf_suffix, _ = MODE_SPEC[args.mode]
+    udf_label = f"{args.udf}_{udf_suffix}"
     print(f"E2E runtime (s) ({args.mode}/{udf_label}): {runtime:.2f}")
 
 
