@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{DType, PartitionedTable}
+import ai.rapids.cudf.{DType, HashType, PartitionedTable}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.shims.ShimExpression
 
@@ -33,19 +33,41 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 trait GpuHashPartitioner extends Serializable {
   protected def hashFunc: GpuHashExpression
 
+  private lazy val fusedMurmur3HashPartitionInfo: Option[(Array[Int], Int)] = hashFunc match {
+    case GpuMurmur3Hash(children, seed) =>
+      val keyIndices = GpuProjectExec.extractSingleBoundIndex(children)
+      if (keyIndices.nonEmpty && keyIndices.forall(_.isDefined)) {
+        Some(keyIndices.map(_.get).toArray -> seed)
+      } else {
+        None
+      }
+    case _ => None
+  }
+
+  private def hashPartitionWithFusedMurmur3(batch: ColumnarBatch,
+      numPartitions: Int): Option[PartitionedTable] = {
+    fusedMurmur3HashPartitionInfo.map { case (keyIndices, seed) =>
+      withResource(GpuColumnVector.from(batch)) { table =>
+        table.onColumns(keyIndices: _*).hashPartition(HashType.MURMUR3, numPartitions, seed)
+      }
+    }
+  }
+
   protected final def hashPartitionAndClose(batch: ColumnarBatch, numPartitions: Int,
       nvtxId: NvtxId): PartitionedTable = {
     withResource(batch) { cb =>
-      val parts = nvtxId {
-        withResource(hashFunc.columnarEval(cb)) { hash =>
-          withResource(GpuScalar.from(numPartitions, IntegerType)) { partsLit =>
-            hash.getBase.pmod(partsLit, DType.INT32)
+      nvtxId {
+        hashPartitionWithFusedMurmur3(cb, numPartitions).getOrElse {
+          val parts = withResource(hashFunc.columnarEval(cb)) { hash =>
+            withResource(GpuScalar.from(numPartitions, IntegerType)) { partsLit =>
+              hash.getBase.pmod(partsLit, DType.INT32)
+            }
           }
-        }
-      }
-      withResource(parts) { parts =>
-        withResource(GpuColumnVector.from(cb)) { table =>
-          table.partition(parts, numPartitions)
+          withResource(parts) { parts =>
+            withResource(GpuColumnVector.from(cb)) { table =>
+              table.partition(parts, numPartitions)
+            }
+          }
         }
       }
     }
