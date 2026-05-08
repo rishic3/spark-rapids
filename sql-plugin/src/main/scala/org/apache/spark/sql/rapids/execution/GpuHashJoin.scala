@@ -1131,7 +1131,8 @@ abstract class BaseHashJoinIterator(
     compareNullsEqual: Boolean,
     conditionForLogging: Option[Expression],
     opTime: GpuMetric,
-    joinTime: GpuMetric)
+    joinTime: GpuMetric,
+    protected val cacheMetrics: BuildSideCacheMetrics = BuildSideCacheMetrics())
     extends SplittableJoinIterator(
       NvtxRegistry.JOIN_GATHER,
       stream,
@@ -1182,19 +1183,31 @@ abstract class BaseHashJoinIterator(
       cachedBuildSide.exists(_.isInstanceOf[CachedDistinctHashJoin])
   }
 
-  // Borrow the shared cuDF hash table while probing. Acquires a lease so that the table cannot
-  // be spilled until we are done probing.
+  // Borrow the shared cuDF hash table while probing. cuDF documents both `cudf::hash_join` and
+  // `cudf::distinct_hash_join` as build-once, probe-many handles that may be probed "possibly in
+  // parallel" (see cudf/cpp/include/cudf/join/{hash_join,distinct_hash_join}.hpp). The lease keeps
+  // the handle from being spilled until this probe is done.
   protected def withCachedHashJoin[T](expectedBuildSide: GpuBuildSide)(f: CudfHashJoin => T): Option[T] = {
+    cacheMetrics.cachedProbeAttempts += 1
     if (!canUseCachedHashJoin(expectedBuildSide)) {
+      cacheMetrics.cachedProbeFallbacks += 1
       None
     } else {
       cachedBuildSide.flatMap { cached =>
         cached match {
           case hashJoin: CachedHashJoin =>
-            withResource(hashJoin.handle.acquire()) { lease =>
-              Some(f(lease.resource))
+            withResource(cacheMetrics.handleAcquireTime.ns {
+              hashJoin.handle.acquire()
+            }) { lease =>
+              val result = cacheMetrics.cachedProbeTime.ns {
+                f(lease.resource)
+              }
+              cacheMetrics.cachedProbeSuccesses += 1
+              Some(result)
             }
-          case _ => None
+          case _ =>
+            cacheMetrics.cachedProbeFallbacks += 1
+            None
         }
       }
     }
@@ -1202,22 +1215,33 @@ abstract class BaseHashJoinIterator(
 
   protected def withCachedDistinctHashJoin[T](
       expectedBuildSide: GpuBuildSide)(f: CudfDistinctHashJoin => T): Option[T] = {
+    cacheMetrics.cachedProbeAttempts += 1
     if (!canUseCachedDistinctHashJoin(expectedBuildSide)) {
+      cacheMetrics.cachedProbeFallbacks += 1
       None
     } else {
       cachedBuildSide.flatMap { cached =>
         cached match {
           case distinctHashJoin: CachedDistinctHashJoin =>
-            withResource(distinctHashJoin.handle.acquire()) { lease =>
-              Some(f(lease.resource))
+            withResource(cacheMetrics.handleAcquireTime.ns {
+              distinctHashJoin.handle.acquire()
+            }) { lease =>
+              val result = cacheMetrics.cachedProbeTime.ns {
+                f(lease.resource)
+              }
+              cacheMetrics.cachedProbeSuccesses += 1
+              Some(result)
             }
-          case _ => None
+          case _ =>
+            cacheMetrics.cachedProbeFallbacks += 1
+            None
         }
       }
     }
   }
 
   protected def disableCachedBuildSide(): Unit = {
+    cacheMetrics.cacheDisables += 1
     cachedBuildSideDisabled = true
   }
 
@@ -1425,7 +1449,9 @@ abstract class BaseHashJoinIterator(
               // to make up the new lazy spillable (`streamBatch`)
               spillOnlyCb.allowSpilling()
 
-              withResource(GpuProjectExec.project(built.getBatch, boundBuiltKeys)) { builtKeys =>
+              withResource(cacheMetrics.regularBuildKeyProjectionTime.ns {
+                GpuProjectExec.project(built.getBatch, boundBuiltKeys)
+              }) { builtKeys =>
                 // ensure that the build data can be spilled
                 built.allowSpilling()
                 joinGatherer(builtKeys, built, streamBatch, numJoinRows)
@@ -1546,7 +1572,8 @@ class HashJoinIterator(
     opTime: GpuMetric,
     private val joinTime: GpuMetric,
     enableBuildSideReuse: Boolean = false,
-    cachedBuildSideSupplier: Option[() => CachedBuildSide] = None)
+    cachedBuildSideSupplier: Option[() => CachedBuildSide] = None,
+    cacheMetrics: BuildSideCacheMetrics = BuildSideCacheMetrics())
     extends BaseHashJoinIterator(
       built,
       boundBuiltKeys,
@@ -1562,7 +1589,8 @@ class HashJoinIterator(
       compareNullsEqual,
       conditionForLogging,
       opTime = opTime,
-      joinTime = joinTime) {
+      joinTime = joinTime,
+      cacheMetrics = cacheMetrics) {
 
   override def computeNumJoinRows(cb: LazySpillableColumnarBatch): Long = {
     lazy val fallback = super.computeNumJoinRows(cb)
@@ -1876,7 +1904,8 @@ class ConditionalHashJoinIterator(
     opTime: GpuMetric,
     joinTime: GpuMetric,
     enableBuildSideReuse: Boolean = false,
-    cachedBuildSideSupplier: Option[() => CachedBuildSide] = None)
+    cachedBuildSideSupplier: Option[() => CachedBuildSide] = None,
+    cacheMetrics: BuildSideCacheMetrics = BuildSideCacheMetrics())
     extends BaseHashJoinIterator(
       built,
       boundBuiltKeys,
@@ -1892,7 +1921,8 @@ class ConditionalHashJoinIterator(
       compareNullsEqual,
       conditionForLogging,
       opTime = opTime,
-      joinTime = joinTime) {
+      joinTime = joinTime,
+      cacheMetrics = cacheMetrics) {
 
   // The AST condition is compiled based on the data movement build side.
   // For INNER_HASH_WITH_POST and INNER_SORT_WITH_POST strategies, the physical build side
@@ -2098,7 +2128,8 @@ class HashJoinStreamSideIterator(
     opTime: GpuMetric,
     joinTime: GpuMetric,
     enableBuildSideReuse: Boolean = false,
-    cachedBuildSideSupplier: Option[() => CachedBuildSide] = None)
+    cachedBuildSideSupplier: Option[() => CachedBuildSide] = None,
+    cacheMetrics: BuildSideCacheMetrics = BuildSideCacheMetrics())
     extends BaseHashJoinIterator(
       built,
       boundBuiltKeys,
@@ -2114,7 +2145,8 @@ class HashJoinStreamSideIterator(
       compareNullsEqual,
       conditionForLogging,
       opTime = opTime,
-      joinTime = joinTime) {
+      joinTime = joinTime,
+      cacheMetrics = cacheMetrics) {
   // Determine the type of join to use as we iterate through the stream-side batches.
   // Each of these outer joins can be implemented in terms of another join as we iterate
   // through the stream-side batches and then emit a final anti-join batch based on which
@@ -2643,14 +2675,15 @@ class HashOuterJoinIterator(
     opTime: GpuMetric,
     joinTime: GpuMetric,
     enableBuildSideReuse: Boolean = false,
-    cachedBuildSideSupplier: Option[() => CachedBuildSide] = None)
+    cachedBuildSideSupplier: Option[() => CachedBuildSide] = None,
+    cacheMetrics: BuildSideCacheMetrics = BuildSideCacheMetrics())
     extends Iterator[ColumnarBatch] with TaskAutoCloseableResource {
 
   private val streamJoinIter = new HashJoinStreamSideIterator(joinType, built, boundBuiltKeys,
     buildStats, buildSideTrackerInit, stream, boundStreamKeys, streamAttributes,
     lazyCompiledCondition,
     joinOptions, buildSide, compareNullsEqual, conditionForLogging, opTime, joinTime,
-    enableBuildSideReuse, cachedBuildSideSupplier)
+    enableBuildSideReuse, cachedBuildSideSupplier, cacheMetrics)
 
   private var finalBatch: Option[ColumnarBatch] = None
 
@@ -2958,7 +2991,8 @@ trait GpuHashJoin extends GpuJoinExec {
       enableBuildSideReuse: Boolean,
       broadcastBatch: Option[SerializeConcatHostBuffersDeserializeBatch] = None,
       buildSideCacheBuilds: GpuMetric = NoopMetric,
-      buildSideCacheHits: GpuMetric = NoopMetric): Iterator[ColumnarBatch] = {
+      buildSideCacheHits: GpuMetric = NoopMetric,
+      cacheMetrics: BuildSideCacheMetrics = BuildSideCacheMetrics()): Iterator[ColumnarBatch] = {
 
     val filterOutNull = GpuHashJoin.buildSideNeedsNullFilter(joinType, compareNullsEqual,
       buildSide, buildKeys)
@@ -2969,7 +3003,8 @@ trait GpuHashJoin extends GpuJoinExec {
           compareNullsEqual,
           filterOutNull,
           buildSideCacheBuilds,
-          buildSideCacheHits)
+          buildSideCacheHits,
+          cacheMetrics)
       }
     } else {
       None
@@ -3022,7 +3057,8 @@ trait GpuHashJoin extends GpuJoinExec {
           lazyCond, joinOptions, buildSide,
           compareNullsEqual, condition, opTime, joinTime,
           enableBuildSideReuse = enableBuildSideReuse && lazyCond.isEmpty,
-          cachedBuildSideSupplier = if (lazyCond.isEmpty) cachedBuildSideSupplier else None)
+          cachedBuildSideSupplier = if (lazyCond.isEmpty) cachedBuildSideSupplier else None,
+          cacheMetrics = cacheMetrics)
       case _ =>
         if (boundConditionLeftRight.isDefined) {
           // ConditionalHashJoinIterator will close the LazyCompiledCondition
@@ -3036,13 +3072,15 @@ trait GpuHashJoin extends GpuJoinExec {
             joinOptions, joinType, buildSide,
             compareNullsEqual, condition, opTime, joinTime,
             enableBuildSideReuse = false,
-            cachedBuildSideSupplier = None)
+            cachedBuildSideSupplier = None,
+            cacheMetrics = cacheMetrics)
         } else {
           new HashJoinIterator(spillableBuiltBatch, boundBuildKeys, None,
             lazyStream, boundStreamKeys, streamedPlan.output, joinOptions,
             joinType, buildSide, compareNullsEqual, condition, opTime, joinTime,
             enableBuildSideReuse = enableBuildSideReuse,
-            cachedBuildSideSupplier = cachedBuildSideSupplier)
+            cachedBuildSideSupplier = cachedBuildSideSupplier,
+            cacheMetrics = cacheMetrics)
         }
     }
 

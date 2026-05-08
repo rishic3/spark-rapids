@@ -118,6 +118,23 @@ object GpuMetric extends Logging {
   val STREAM_TIME = "streamTime"
   val BUILD_SIDE_CACHE_BUILDS = "buildSideCacheBuilds"
   val BUILD_SIDE_CACHE_HITS = "buildSideCacheHits"
+  val BUILD_SIDE_CACHE_BUILD_TIME = "buildSideCacheBuildTime"
+  val BUILD_SIDE_CACHE_KEY_NULL_FILTER_TIME = "buildSideCacheKeyNullFilterTime"
+  val BUILD_SIDE_CACHE_KEY_PROJECTION_TIME = "buildSideCacheKeyProjectionTime"
+  val BUILD_SIDE_CACHE_KEY_TO_TABLE_TIME = "buildSideCacheKeyToTableTime"
+  val BUILD_SIDE_CACHE_STATS_TIME = "buildSideCacheStatsTime"
+  val BUILD_SIDE_CACHE_HANDLE_ACQUIRE_TIME = "buildSideCacheHandleAcquireTime"
+  val BUILD_SIDE_CACHE_HANDLE_REBUILDS = "buildSideCacheHandleRebuilds"
+  val BUILD_SIDE_CACHE_HANDLE_REBUILD_TIME = "buildSideCacheHandleRebuildTime"
+  val BUILD_SIDE_CACHE_HANDLE_SPILLS = "buildSideCacheHandleSpills"
+  val BUILD_SIDE_CACHE_HANDLE_SPILL_BYTES = "buildSideCacheHandleSpillBytes"
+  val BUILD_SIDE_CACHE_CACHED_PROBE_ATTEMPTS = "buildSideCacheCachedProbeAttempts"
+  val BUILD_SIDE_CACHE_CACHED_PROBE_SUCCESSES = "buildSideCacheCachedProbeSuccesses"
+  val BUILD_SIDE_CACHE_CACHED_PROBE_FALLBACKS = "buildSideCacheCachedProbeFallbacks"
+  val BUILD_SIDE_CACHE_CACHED_PROBE_TIME = "buildSideCacheCachedProbeTime"
+  val BUILD_SIDE_CACHE_REGULAR_BUILD_KEY_PROJECTION_TIME =
+    "buildSideCacheRegularBuildKeyProjectionTime"
+  val BUILD_SIDE_CACHE_DISABLES = "buildSideCacheDisables"
   val NUM_TASKS_FALL_BACKED = "numTasksFallBacked"
   val NUM_TASKS_REPARTITIONED = "numTasksRepartitioned"
   val NUM_TASKS_SKIPPED_AGG = "numTasksSkippedAgg"
@@ -177,6 +194,32 @@ object GpuMetric extends Logging {
   val DESCRIPTION_STREAM_TIME = "stream time"
   val DESCRIPTION_BUILD_SIDE_CACHE_BUILDS = "cached build side builds"
   val DESCRIPTION_BUILD_SIDE_CACHE_HITS = "cached build side hits"
+  val DESCRIPTION_BUILD_SIDE_CACHE_BUILD_TIME = "cached build side build time"
+  val DESCRIPTION_BUILD_SIDE_CACHE_KEY_NULL_FILTER_TIME =
+    "cached build side key null filter time"
+  val DESCRIPTION_BUILD_SIDE_CACHE_KEY_PROJECTION_TIME =
+    "cached build side key projection time"
+  val DESCRIPTION_BUILD_SIDE_CACHE_KEY_TO_TABLE_TIME =
+    "cached build side key conversion time"
+  val DESCRIPTION_BUILD_SIDE_CACHE_STATS_TIME = "cached build side stats time"
+  val DESCRIPTION_BUILD_SIDE_CACHE_HANDLE_ACQUIRE_TIME =
+    "cached build side handle acquire time"
+  val DESCRIPTION_BUILD_SIDE_CACHE_HANDLE_REBUILDS = "cached build side handle rebuilds"
+  val DESCRIPTION_BUILD_SIDE_CACHE_HANDLE_REBUILD_TIME =
+    "cached build side handle rebuild time"
+  val DESCRIPTION_BUILD_SIDE_CACHE_HANDLE_SPILLS = "cached build side handle spills"
+  val DESCRIPTION_BUILD_SIDE_CACHE_HANDLE_SPILL_BYTES = "cached build side handle spill bytes"
+  val DESCRIPTION_BUILD_SIDE_CACHE_CACHED_PROBE_ATTEMPTS =
+    "cached build side probe attempts"
+  val DESCRIPTION_BUILD_SIDE_CACHE_CACHED_PROBE_SUCCESSES =
+    "cached build side probe successes"
+  val DESCRIPTION_BUILD_SIDE_CACHE_CACHED_PROBE_FALLBACKS =
+    "cached build side probe fallbacks"
+  val DESCRIPTION_BUILD_SIDE_CACHE_CACHED_PROBE_TIME =
+    "cached build side probe time"
+  val DESCRIPTION_BUILD_SIDE_CACHE_REGULAR_BUILD_KEY_PROJECTION_TIME =
+    "regular build side key projection time"
+  val DESCRIPTION_BUILD_SIDE_CACHE_DISABLES = "cached build side disables"
   val DESCRIPTION_NUM_TASKS_FALL_BACKED = "number of sort fallback tasks"
   val DESCRIPTION_NUM_TASKS_REPARTITIONED = "number of tasks repartitioned for agg"
   val DESCRIPTION_NUM_TASKS_SKIPPED_AGG = "number of tasks skipped aggregation"

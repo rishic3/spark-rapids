@@ -17,7 +17,8 @@
 package org.apache.spark.sql.rapids.execution
 
 import ai.rapids.cudf.{DistinctHashJoin => CudfDistinctHashJoin, HashJoin => CudfHashJoin, Table}
-import com.nvidia.spark.rapids.{GpuColumnVector, GpuExpression, GpuProjectExec, NvtxRegistry, SpillableColumnarBatch}
+import com.nvidia.spark.rapids.{GpuColumnVector, GpuExpression, GpuMetric, GpuProjectExec}
+import com.nvidia.spark.rapids.{NoopMetric, NvtxRegistry, SpillableColumnarBatch}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.spill.SharedRecomputableDeviceHandle
@@ -33,6 +34,24 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 sealed trait CachedBuildSide extends AutoCloseable {
   def buildStats: JoinBuildSideStats
 }
+
+final case class BuildSideCacheMetrics(
+    buildTime: GpuMetric = NoopMetric,
+    keyNullFilterTime: GpuMetric = NoopMetric,
+    keyProjectionTime: GpuMetric = NoopMetric,
+    keyToTableTime: GpuMetric = NoopMetric,
+    statsTime: GpuMetric = NoopMetric,
+    handleAcquireTime: GpuMetric = NoopMetric,
+    handleRebuilds: GpuMetric = NoopMetric,
+    handleRebuildTime: GpuMetric = NoopMetric,
+    handleSpills: GpuMetric = NoopMetric,
+    handleSpillBytes: GpuMetric = NoopMetric,
+    cachedProbeAttempts: GpuMetric = NoopMetric,
+    cachedProbeSuccesses: GpuMetric = NoopMetric,
+    cachedProbeFallbacks: GpuMetric = NoopMetric,
+    cachedProbeTime: GpuMetric = NoopMetric,
+    regularBuildKeyProjectionTime: GpuMetric = NoopMetric,
+    cacheDisables: GpuMetric = NoopMetric)
 
 final class CachedHashJoin(
     override val buildStats: JoinBuildSideStats,
@@ -74,17 +93,24 @@ object BroadcastCachedBuildSide {
   private def withBuildKeys[T](
       broadcastBatch: SpillableColumnarBatch,
       boundBuiltKeys: Seq[GpuExpression],
-      filterOutNulls: Boolean)(f: Table => T): T = {
+      filterOutNulls: Boolean,
+      metrics: BuildSideCacheMetrics)(f: Table => T): T = {
     def projectAndApply(cb: ColumnarBatch): T = {
-      withResource(GpuProjectExec.project(cb, boundBuiltKeys)) { buildKeys =>
-        withResource(GpuColumnVector.from(buildKeys)) { buildKeysTable =>
+      withResource(metrics.keyProjectionTime.ns {
+        GpuProjectExec.project(cb, boundBuiltKeys)
+      }) { buildKeys =>
+        withResource(metrics.keyToTableTime.ns {
+          GpuColumnVector.from(buildKeys)
+        }) { buildKeysTable =>
           f(buildKeysTable)
         }
       }
     }
     if (filterOutNulls) {
       val retainedBatch = broadcastBatch.incRefCount()
-      withResource(GpuHashJoin.filterNullsWithRetryAndClose(retainedBatch, boundBuiltKeys)) {
+      withResource(metrics.keyNullFilterTime.ns {
+        GpuHashJoin.filterNullsWithRetryAndClose(retainedBatch, boundBuiltKeys)
+      }) {
         projectAndApply
       }
     } else {
@@ -95,7 +121,9 @@ object BroadcastCachedBuildSide {
     }
   }
 
-  private def newHashJoin(buildKeys: Table, compareNullsEqual: Boolean): CudfHashJoin = {
+  private def newHashJoin(
+      buildKeys: Table,
+      compareNullsEqual: Boolean): CudfHashJoin = {
     NvtxRegistry.BROADCAST_HASH_TABLE_BUILD {
       new CudfHashJoin(buildKeys, compareNullsEqual)
     }
@@ -113,21 +141,24 @@ object BroadcastCachedBuildSide {
       broadcastBatch: SpillableColumnarBatch,
       boundBuiltKeys: Seq[GpuExpression],
       compareNullsEqual: Boolean,
-      filterOutNulls: Boolean): CachedBuildSide = {
+      filterOutNulls: Boolean,
+      metrics: BuildSideCacheMetrics = BuildSideCacheMetrics()): CachedBuildSide = {
     def buildHashJoin(): CudfHashJoin = {
-      withBuildKeys(broadcastBatch, boundBuiltKeys, filterOutNulls) { buildKeys =>
+      withBuildKeys(broadcastBatch, boundBuiltKeys, filterOutNulls, metrics) { buildKeys =>
         newHashJoin(buildKeys, compareNullsEqual)
       }
     }
 
     def buildDistinctHashJoin(): CudfDistinctHashJoin = {
-      withBuildKeys(broadcastBatch, boundBuiltKeys, filterOutNulls) { buildKeys =>
+      withBuildKeys(broadcastBatch, boundBuiltKeys, filterOutNulls, metrics) { buildKeys =>
         newDistinctHashJoin(buildKeys, compareNullsEqual)
       }
     }
 
-    withBuildKeys(broadcastBatch, boundBuiltKeys, filterOutNulls) { buildKeys =>
-      val stats = JoinBuildSideStats.fromTable(buildKeys)
+    withBuildKeys(broadcastBatch, boundBuiltKeys, filterOutNulls, metrics) { buildKeys =>
+      val stats = metrics.statsTime.ns {
+        JoinBuildSideStats.fromTable(buildKeys)
+      }
       // cuDF does not expose the size of the native hash-table;
       // using the projected build-key table size as an approximation for spill accounting
       val approxSizeInBytes = buildKeys.getDeviceMemorySize
@@ -136,7 +167,11 @@ object BroadcastCachedBuildSide {
           stats,
           SharedRecomputableDeviceHandle(
             approxSizeInBytes,
-            newDistinctHashJoin(buildKeys, compareNullsEqual)) {
+            newDistinctHashJoin(buildKeys, compareNullsEqual),
+            metrics.handleRebuilds,
+            metrics.handleRebuildTime,
+            metrics.handleSpills,
+            metrics.handleSpillBytes) {
             buildDistinctHashJoin()
           })
       } else {
@@ -144,7 +179,11 @@ object BroadcastCachedBuildSide {
           stats,
           SharedRecomputableDeviceHandle(
             approxSizeInBytes,
-            newHashJoin(buildKeys, compareNullsEqual)) {
+            newHashJoin(buildKeys, compareNullsEqual),
+            metrics.handleRebuilds,
+            metrics.handleRebuildTime,
+            metrics.handleSpills,
+            metrics.handleSpillBytes) {
             buildHashJoin()
           })
       }

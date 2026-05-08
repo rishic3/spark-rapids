@@ -175,7 +175,9 @@ class SerializeConcatHostBuffersDeserializeBatch(
       compareNullsEqual: Boolean,
       filterOutNulls: Boolean,
       cacheBuilds: GpuMetric = NoopMetric,
-      cacheHits: GpuMetric = NoopMetric): CachedBuildSide = this.synchronized {
+      cacheHits: GpuMetric = NoopMetric,
+      cacheMetrics: BuildSideCacheMetrics = BuildSideCacheMetrics()): CachedBuildSide =
+    this.synchronized {
     val cacheKey = BroadcastCachedBuildSide.key(
       boundBuiltKeys,
       compareNullsEqual,
@@ -185,11 +187,14 @@ class SerializeConcatHostBuffersDeserializeBatch(
       cached
     }.getOrElse {
       cacheBuilds += 1
-      val cached = BroadcastCachedBuildSide.create(
-        batch,
-        boundBuiltKeys,
-        compareNullsEqual,
-        filterOutNulls)
+      val cached = cacheMetrics.buildTime.ns {
+        BroadcastCachedBuildSide.create(
+          batch,
+          boundBuiltKeys,
+          compareNullsEqual,
+          filterOutNulls,
+          cacheMetrics)
+      }
       cachedBuildSides.put(cacheKey, cached)
       cached
     }

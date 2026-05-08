@@ -121,7 +121,40 @@ abstract class GpuBroadcastHashJoinExecBase(
     STREAM_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_STREAM_TIME),
     JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME),
     BUILD_SIDE_CACHE_BUILDS -> createMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_BUILDS),
-    BUILD_SIDE_CACHE_HITS -> createMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_HITS))
+    BUILD_SIDE_CACHE_HITS -> createMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_HITS),
+    BUILD_SIDE_CACHE_BUILD_TIME ->
+      createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_BUILD_TIME),
+    BUILD_SIDE_CACHE_KEY_NULL_FILTER_TIME ->
+      createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_KEY_NULL_FILTER_TIME),
+    BUILD_SIDE_CACHE_KEY_PROJECTION_TIME ->
+      createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_KEY_PROJECTION_TIME),
+    BUILD_SIDE_CACHE_KEY_TO_TABLE_TIME ->
+      createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_KEY_TO_TABLE_TIME),
+    BUILD_SIDE_CACHE_STATS_TIME ->
+      createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_STATS_TIME),
+    BUILD_SIDE_CACHE_HANDLE_ACQUIRE_TIME ->
+      createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_HANDLE_ACQUIRE_TIME),
+    BUILD_SIDE_CACHE_HANDLE_REBUILDS ->
+      createMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_HANDLE_REBUILDS),
+    BUILD_SIDE_CACHE_HANDLE_REBUILD_TIME ->
+      createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_HANDLE_REBUILD_TIME),
+    BUILD_SIDE_CACHE_HANDLE_SPILLS ->
+      createMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_HANDLE_SPILLS),
+    BUILD_SIDE_CACHE_HANDLE_SPILL_BYTES ->
+      createSizeMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_HANDLE_SPILL_BYTES),
+    BUILD_SIDE_CACHE_CACHED_PROBE_ATTEMPTS ->
+      createMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_CACHED_PROBE_ATTEMPTS),
+    BUILD_SIDE_CACHE_CACHED_PROBE_SUCCESSES ->
+      createMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_CACHED_PROBE_SUCCESSES),
+    BUILD_SIDE_CACHE_CACHED_PROBE_FALLBACKS ->
+      createMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_CACHED_PROBE_FALLBACKS),
+    BUILD_SIDE_CACHE_CACHED_PROBE_TIME ->
+      createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_CACHED_PROBE_TIME),
+    BUILD_SIDE_CACHE_REGULAR_BUILD_KEY_PROJECTION_TIME ->
+      createNanoTimingMetric(DEBUG_LEVEL,
+        DESCRIPTION_BUILD_SIDE_CACHE_REGULAR_BUILD_KEY_PROJECTION_TIME),
+    BUILD_SIDE_CACHE_DISABLES ->
+      createMetric(DEBUG_LEVEL, DESCRIPTION_BUILD_SIDE_CACHE_DISABLES))
 
   override def requiredChildDistribution: Seq[Distribution] = {
     val mode = HashedRelationBroadcastMode(buildKeys)
@@ -156,6 +189,24 @@ abstract class GpuBroadcastHashJoinExecBase(
     val joinTime = gpuLongMetric(JOIN_TIME)
     val buildSideCacheBuilds = gpuLongMetric(BUILD_SIDE_CACHE_BUILDS)
     val buildSideCacheHits = gpuLongMetric(BUILD_SIDE_CACHE_HITS)
+    val cacheMetrics = BuildSideCacheMetrics(
+      buildTime = gpuLongMetric(BUILD_SIDE_CACHE_BUILD_TIME),
+      keyNullFilterTime = gpuLongMetric(BUILD_SIDE_CACHE_KEY_NULL_FILTER_TIME),
+      keyProjectionTime = gpuLongMetric(BUILD_SIDE_CACHE_KEY_PROJECTION_TIME),
+      keyToTableTime = gpuLongMetric(BUILD_SIDE_CACHE_KEY_TO_TABLE_TIME),
+      statsTime = gpuLongMetric(BUILD_SIDE_CACHE_STATS_TIME),
+      handleAcquireTime = gpuLongMetric(BUILD_SIDE_CACHE_HANDLE_ACQUIRE_TIME),
+      handleRebuilds = gpuLongMetric(BUILD_SIDE_CACHE_HANDLE_REBUILDS),
+      handleRebuildTime = gpuLongMetric(BUILD_SIDE_CACHE_HANDLE_REBUILD_TIME),
+      handleSpills = gpuLongMetric(BUILD_SIDE_CACHE_HANDLE_SPILLS),
+      handleSpillBytes = gpuLongMetric(BUILD_SIDE_CACHE_HANDLE_SPILL_BYTES),
+      cachedProbeAttempts = gpuLongMetric(BUILD_SIDE_CACHE_CACHED_PROBE_ATTEMPTS),
+      cachedProbeSuccesses = gpuLongMetric(BUILD_SIDE_CACHE_CACHED_PROBE_SUCCESSES),
+      cachedProbeFallbacks = gpuLongMetric(BUILD_SIDE_CACHE_CACHED_PROBE_FALLBACKS),
+      cachedProbeTime = gpuLongMetric(BUILD_SIDE_CACHE_CACHED_PROBE_TIME),
+      regularBuildKeyProjectionTime =
+        gpuLongMetric(BUILD_SIDE_CACHE_REGULAR_BUILD_KEY_PROJECTION_TIME),
+      cacheDisables = gpuLongMetric(BUILD_SIDE_CACHE_DISABLES))
 
     val targetSize = RapidsConf.GPU_BATCH_SIZE_BYTES.get(conf)
     val joinOptions = RapidsConf.getJoinOptions(conf, targetSize)
@@ -200,7 +251,8 @@ abstract class GpuBroadcastHashJoinExecBase(
             numOutputBatches, opTime, joinTime, enableBuildSideReuse,
             broadcastBatch = broadcastBatch,
             buildSideCacheBuilds = buildSideCacheBuilds,
-            buildSideCacheHits = buildSideCacheHits)
+            buildSideCacheHits = buildSideCacheHits,
+            cacheMetrics = cacheMetrics)
         }
       } else {
         // builtBatch will be closed in doJoin
@@ -208,7 +260,8 @@ abstract class GpuBroadcastHashJoinExecBase(
           joinTime, enableBuildSideReuse,
           broadcastBatch = broadcastBatch,
           buildSideCacheBuilds = buildSideCacheBuilds,
-          buildSideCacheHits = buildSideCacheHits)
+          buildSideCacheHits = buildSideCacheHits,
+          cacheMetrics = cacheMetrics)
       }
     }
   }

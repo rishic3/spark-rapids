@@ -27,7 +27,7 @@ import java.util.concurrent.ArrayBlockingQueue
 import scala.collection.mutable
 
 import ai.rapids.cudf._
-import com.nvidia.spark.rapids.{GpuColumnVector, GpuColumnVectorFromBuffer, GpuCompressedColumnVector, GpuDeviceManager, HashedPriorityQueue, HostAlloc, HostMemoryOutputStream, MemoryBufferToHostByteBufferIterator, NvtxId, NvtxRegistry, RapidsConf, RapidsHostColumnVector}
+import com.nvidia.spark.rapids.{GpuColumnVector, GpuColumnVectorFromBuffer, GpuCompressedColumnVector, GpuDeviceManager, GpuMetric, HashedPriorityQueue, HostAlloc, HostMemoryOutputStream, MemoryBufferToHostByteBufferIterator, NoopMetric, NvtxId, NvtxRegistry, RapidsConf, RapidsHostColumnVector}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableSeq
 import com.nvidia.spark.rapids.format.TableMeta
@@ -350,9 +350,20 @@ object SharedRecomputableDeviceHandle {
 
   def apply[T <: AutoCloseable](
       approxSizeInBytes: Long,
-      initialValue: T)(
+      initialValue: T,
+      rebuildsMetric: GpuMetric = NoopMetric,
+      rebuildTimeMetric: GpuMetric = NoopMetric,
+      spillsMetric: GpuMetric = NoopMetric,
+      spillBytesMetric: GpuMetric = NoopMetric)(
       rebuild: => T): SharedRecomputableDeviceHandle[T] = {
-    val handle = new SharedRecomputableDeviceHandle(approxSizeInBytes, initialValue, () => rebuild)
+    val handle = new SharedRecomputableDeviceHandle(
+      approxSizeInBytes,
+      initialValue,
+      () => rebuild,
+      rebuildsMetric,
+      rebuildTimeMetric,
+      spillsMetric,
+      spillBytesMetric)
     SpillFramework.stores.deviceStore.track(handle)
     handle
   }
@@ -376,7 +387,11 @@ object SharedRecomputableDeviceHandle {
 class SharedRecomputableDeviceHandle[T <: AutoCloseable] private[spill] (
     override val approxSizeInBytes: Long,
     initialValue: T,
-    rebuild: () => T) extends DeviceStoreHandle with Logging {
+    rebuild: () => T,
+    rebuildsMetric: GpuMetric = NoopMetric,
+    rebuildTimeMetric: GpuMetric = NoopMetric,
+    spillsMetric: GpuMetric = NoopMetric,
+    spillBytesMetric: GpuMetric = NoopMetric) extends DeviceStoreHandle with Logging {
   import SharedRecomputableDeviceHandle.Lease
 
   private[spill] var dev: Option[T] = Some(initialValue)
@@ -418,7 +433,10 @@ class SharedRecomputableDeviceHandle[T <: AutoCloseable] private[spill] (
       if (shouldBuild) {
         var rebuilt: Option[T] = None
         try {
-          rebuilt = Some(rebuild())
+          rebuildsMetric += 1
+          rebuilt = Some(rebuildTimeMetric.ns {
+            rebuild()
+          })
           var shouldTrack = false
           synchronized {
             rebuilding = false
@@ -471,6 +489,8 @@ class SharedRecomputableDeviceHandle[T <: AutoCloseable] private[spill] (
       }
     }
     if (thisThreadSpills) {
+      spillsMetric += 1
+      spillBytesMetric += approxSizeInBytes
       SpillFramework.removeFromDeviceStore(this)
       var shouldClose = false
       executeSpill {
