@@ -119,7 +119,17 @@ abstract class GpuBroadcastHashJoinExecBase(
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
     OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
     STREAM_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_STREAM_TIME),
-    JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME))
+    JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME),
+    REGULAR_BUILD_SIDE_BUILDS ->
+      createMetric(DEBUG_LEVEL, DESCRIPTION_REGULAR_BUILD_SIDE_BUILDS),
+    REGULAR_BUILD_SIDE_KEY_PROJECTION_TIME ->
+      createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_REGULAR_BUILD_SIDE_KEY_PROJECTION_TIME),
+    REGULAR_BUILD_SIDE_KEY_CONVERSION_TIME ->
+      createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_REGULAR_BUILD_SIDE_KEY_CONVERSION_TIME),
+    REGULAR_BUILD_SIDE_STATS_TIME ->
+      createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_REGULAR_BUILD_SIDE_STATS_TIME),
+    REGULAR_NATIVE_HASH_JOIN_TIME ->
+      createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_REGULAR_NATIVE_HASH_JOIN_TIME))
 
   override def requiredChildDistribution: Seq[Distribution] = {
     val mode = HashedRelationBroadcastMode(buildKeys)
@@ -152,6 +162,12 @@ abstract class GpuBroadcastHashJoinExecBase(
     val opTime = gpuLongMetric(OP_TIME_LEGACY)
     val streamTime = gpuLongMetric(STREAM_TIME)
     val joinTime = gpuLongMetric(JOIN_TIME)
+    val regularBuildSideMetrics = RegularBuildSideMetrics(
+      buildSideBuilds = gpuLongMetric(REGULAR_BUILD_SIDE_BUILDS),
+      keyProjectionTime = gpuLongMetric(REGULAR_BUILD_SIDE_KEY_PROJECTION_TIME),
+      keyConversionTime = gpuLongMetric(REGULAR_BUILD_SIDE_KEY_CONVERSION_TIME),
+      statsTime = gpuLongMetric(REGULAR_BUILD_SIDE_STATS_TIME),
+      nativeHashJoinTime = gpuLongMetric(REGULAR_NATIVE_HASH_JOIN_TIME))
 
     val targetSize = RapidsConf.GPU_BATCH_SIZE_BYTES.get(conf)
     val joinOptions = RapidsConf.getJoinOptions(conf, targetSize)
@@ -187,12 +203,12 @@ abstract class GpuBroadcastHashJoinExecBase(
               boundStreamKeys)
           }
           doJoin(builtBatch, nullFilteredStreamIter, joinOptions, numOutputRows,
-            numOutputBatches, opTime, joinTime)
+            numOutputBatches, opTime, joinTime, regularBuildSideMetrics)
         }
       } else {
         // builtBatch will be closed in doJoin
         doJoin(builtBatch, streamIter, joinOptions, numOutputRows, numOutputBatches, opTime,
-          joinTime)
+          joinTime, regularBuildSideMetrics)
       }
     }
   }

@@ -116,6 +116,11 @@ object GpuMetric extends Logging {
   val BUILD_DATA_SIZE = "buildDataSize"
   val BUILD_TIME = "buildTime"
   val STREAM_TIME = "streamTime"
+  val REGULAR_BUILD_SIDE_BUILDS = "regularBuildSideBuilds"
+  val REGULAR_BUILD_SIDE_KEY_PROJECTION_TIME = "regularBuildSideKeyProjectionTime"
+  val REGULAR_BUILD_SIDE_KEY_CONVERSION_TIME = "regularBuildSideKeyConversionTime"
+  val REGULAR_BUILD_SIDE_STATS_TIME = "regularBuildSideStatsTime"
+  val REGULAR_NATIVE_HASH_JOIN_TIME = "regularNativeHashJoinTime"
   val NUM_TASKS_FALL_BACKED = "numTasksFallBacked"
   val NUM_TASKS_REPARTITIONED = "numTasksRepartitioned"
   val NUM_TASKS_SKIPPED_AGG = "numTasksSkippedAgg"
@@ -173,6 +178,14 @@ object GpuMetric extends Logging {
   val DESCRIPTION_BUILD_DATA_SIZE = "build side size"
   val DESCRIPTION_BUILD_TIME = "build time"
   val DESCRIPTION_STREAM_TIME = "stream time"
+  val DESCRIPTION_REGULAR_BUILD_SIDE_BUILDS = "regular build side builds"
+  val DESCRIPTION_REGULAR_BUILD_SIDE_KEY_PROJECTION_TIME =
+    "regular build side key projection time"
+  val DESCRIPTION_REGULAR_BUILD_SIDE_KEY_CONVERSION_TIME =
+    "regular build side key conversion time"
+  val DESCRIPTION_REGULAR_BUILD_SIDE_STATS_TIME = "regular build side stats time"
+  val DESCRIPTION_REGULAR_NATIVE_HASH_JOIN_TIME =
+    "regular native hash join time"
   val DESCRIPTION_NUM_TASKS_FALL_BACKED = "number of sort fallback tasks"
   val DESCRIPTION_NUM_TASKS_REPARTITIONED = "number of tasks repartitioned for agg"
   val DESCRIPTION_NUM_TASKS_SKIPPED_AGG = "number of tasks skipped aggregation"
