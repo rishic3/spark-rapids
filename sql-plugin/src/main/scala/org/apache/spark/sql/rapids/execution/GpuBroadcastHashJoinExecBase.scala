@@ -167,6 +167,10 @@ abstract class GpuBroadcastHashJoinExecBase(
           broadcastRelation,
           buildSchema,
           new CollectTimeIterator(NvtxRegistry.BROADCAST_JOIN_STREAM, it, streamTime))
+      val broadcastBatch = broadcastRelation.value match {
+        case batch: SerializeConcatHostBuffersDeserializeBatch => Some(batch)
+        case _ => None
+      }
       if (localIsNullAwareAntiJoin) {
         // This is to support the null-aware anti join for the LeftAnti join with
         // BuildRight. See the config "spark.sql.optimizeNullAwareAntiJoin".
@@ -187,12 +191,12 @@ abstract class GpuBroadcastHashJoinExecBase(
               boundStreamKeys)
           }
           doJoin(builtBatch, nullFilteredStreamIter, joinOptions, numOutputRows,
-            numOutputBatches, opTime, joinTime)
+            numOutputBatches, opTime, joinTime, broadcastBatch = broadcastBatch)
         }
       } else {
         // builtBatch will be closed in doJoin
         doJoin(builtBatch, streamIter, joinOptions, numOutputRows, numOutputBatches, opTime,
-          joinTime)
+          joinTime, broadcastBatch = broadcastBatch)
       }
     }
   }

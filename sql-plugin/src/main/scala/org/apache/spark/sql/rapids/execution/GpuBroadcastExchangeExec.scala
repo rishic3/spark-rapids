@@ -52,6 +52,23 @@ import org.apache.spark.sql.internal.{SQLConf, StaticSQLConf}
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
+private case class BroadcastBuildSideStatsKey(
+    projectedBuildKeys: Seq[String],
+    compareNullsEqual: Boolean,
+    filterOutNulls: Boolean)
+
+private object BroadcastBuildSideStatsKey {
+  def fromExpressions(
+      boundBuiltKeys: Seq[GpuExpression],
+      compareNullsEqual: Boolean,
+      filterOutNulls: Boolean): BroadcastBuildSideStatsKey = {
+    BroadcastBuildSideStatsKey(
+      boundBuiltKeys.map(_.canonicalized.sql),
+      compareNullsEqual,
+      filterOutNulls)
+  }
+}
+
 /**
  * Class that is used to broadcast results (a contiguous host batch) to executors.
  *
@@ -80,8 +97,18 @@ class SerializeConcatHostBuffersDeserializeBatch(
 
   // used for memoization of deserialization to GPU on Executor
   @transient private var batchInternal: SpillableColumnarBatch = null
+  @transient private var buildSideStatsCache:
+      mutable.HashMap[BroadcastBuildSideStatsKey, JoinBuildSideStats] = _
 
   private def maybeGpuBatch: Option[SpillableColumnarBatch] = Option(batchInternal)
+
+  private def buildSideStatsCacheMap:
+      mutable.HashMap[BroadcastBuildSideStatsKey, JoinBuildSideStats] = {
+    if (buildSideStatsCache == null) {
+      buildSideStatsCache = mutable.HashMap.empty
+    }
+    buildSideStatsCache
+  }
 
   def batch: SpillableColumnarBatch = this.synchronized {
     maybeGpuBatch.getOrElse {
@@ -147,6 +174,26 @@ class SerializeConcatHostBuffersDeserializeBatch(
       }
     }
   }
+
+  /**
+   * Get or create executor-local build-side statistics for this broadcast/key projection.
+   *
+   * Broadcast hash joins repeatedly need the same build-key distinctness and magnification
+   * estimates across tasks on an executor. These stats are small CPU values, so they can be
+   * cached on the shared broadcast payload without retaining any cuDF hash table or GPU state.
+   */
+  def getOrCreateBuildSideStats(
+      boundBuiltKeys: Seq[GpuExpression],
+      compareNullsEqual: Boolean,
+      filterOutNulls: Boolean)(computeStats: => JoinBuildSideStats): JoinBuildSideStats =
+    this.synchronized {
+      val cacheKey = BroadcastBuildSideStatsKey.fromExpressions(
+        boundBuiltKeys,
+        compareNullsEqual,
+        filterOutNulls)
+      val cache = buildSideStatsCacheMap
+      cache.getOrElseUpdate(cacheKey, computeStats)
+    }
 
   private def writeObject(out: ObjectOutputStream): Unit = {
     doWriteObject(out)
@@ -248,6 +295,7 @@ class SerializeConcatHostBuffersDeserializeBatch(
     Seq(data, batchInternal).safeClose()
     data = null
     batchInternal = null
+    buildSideStatsCache = null
   }
 
   @scala.annotation.nowarn("msg=method finalize in class Object is deprecated")

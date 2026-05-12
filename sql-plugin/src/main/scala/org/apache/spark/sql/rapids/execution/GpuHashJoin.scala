@@ -1012,6 +1012,13 @@ case class JoinCardinalityStats(
 case class JoinBuildSideStats(streamMagnificationFactor: Double, isDistinct: Boolean)
 
 object JoinBuildSideStats {
+  def fromTable(buildKeys: Table): JoinBuildSideStats = {
+    val builtCount = buildKeys.distinctCount(NullEquality.EQUAL)
+    val isDistinct = builtCount == buildKeys.getRowCount
+    val magnificationFactor = buildKeys.getRowCount.toDouble / builtCount
+    JoinBuildSideStats(magnificationFactor, isDistinct)
+  }
+
   def fromBatch(batch: ColumnarBatch,
                 boundBuildKeys: Seq[GpuExpression]): JoinBuildSideStats = {
     // This is okay because the build keys must be deterministic
@@ -1020,10 +1027,7 @@ object JoinBuildSideStats {
       // will be for each input row on the stream side. This does not take into account
       // the join type, data skew or even if the keys actually match.
       withResource(GpuColumnVector.from(buildKeys)) { keysTable =>
-        val builtCount = keysTable.distinctCount(NullEquality.EQUAL)
-        val isDistinct = builtCount == buildKeys.numRows()
-        val magnificationFactor = buildKeys.numRows().toDouble / builtCount
-        JoinBuildSideStats(magnificationFactor, isDistinct)
+        fromTable(keysTable)
       }
     }
   }
@@ -1039,7 +1043,7 @@ object JoinBuildSideStats {
 abstract class BaseHashJoinIterator(
     built: LazySpillableColumnarBatch,
     boundBuiltKeys: Seq[GpuExpression],
-    buildStatsOpt: Option[JoinBuildSideStats],
+    buildStatsOpt: => Option[JoinBuildSideStats],
     stream: Iterator[LazySpillableColumnarBatch],
     boundStreamKeys: Seq[GpuExpression],
     streamAttributes: Seq[Attribute],
@@ -1374,7 +1378,7 @@ abstract class BaseHashJoinIterator(
 class HashJoinIterator(
     built: LazySpillableColumnarBatch,
     val boundBuiltKeys: Seq[GpuExpression],
-    buildStatsOpt: Option[JoinBuildSideStats],
+    buildStatsOpt: => Option[JoinBuildSideStats],
     private val stream: Iterator[LazySpillableColumnarBatch],
     val boundStreamKeys: Seq[GpuExpression],
     val streamAttributes: Seq[Attribute],
@@ -1556,7 +1560,7 @@ class HashJoinIterator(
 class ConditionalHashJoinIterator(
     built: LazySpillableColumnarBatch,
     boundBuiltKeys: Seq[GpuExpression],
-    buildStatsOpt: Option[JoinBuildSideStats],
+    buildStatsOpt: => Option[JoinBuildSideStats],
     stream: Iterator[LazySpillableColumnarBatch],
     boundStreamKeys: Seq[GpuExpression],
     streamAttributes: Seq[Attribute],
@@ -1772,7 +1776,7 @@ class HashJoinStreamSideIterator(
     joinType: JoinType,
     built: LazySpillableColumnarBatch,
     boundBuiltKeys: Seq[GpuExpression],
-    buildStatsOpt: Option[JoinBuildSideStats],
+    buildStatsOpt: => Option[JoinBuildSideStats],
     buildSideTrackerInit: Option[SpillableColumnarBatch],
     stream: Iterator[LazySpillableColumnarBatch],
     boundStreamKeys: Seq[GpuExpression],
@@ -2231,7 +2235,7 @@ class HashOuterJoinIterator(
     joinType: JoinType,
     built: LazySpillableColumnarBatch,
     boundBuiltKeys: Seq[GpuExpression],
-    buildStats: Option[JoinBuildSideStats],
+    buildStats: => Option[JoinBuildSideStats],
     buildSideTrackerInit: Option[SpillableColumnarBatch],
     stream: Iterator[LazySpillableColumnarBatch],
     boundStreamKeys: Seq[GpuExpression],
@@ -2551,7 +2555,9 @@ trait GpuHashJoin extends GpuJoinExec {
       numOutputRows: GpuMetric,
       numOutputBatches: GpuMetric,
       opTime: GpuMetric,
-      joinTime: GpuMetric): Iterator[ColumnarBatch] = {
+      joinTime: GpuMetric,
+      broadcastBatch: Option[SerializeConcatHostBuffersDeserializeBatch] = None)
+      : Iterator[ColumnarBatch] = {
 
     val filterOutNull = GpuHashJoin.buildSideNeedsNullFilter(joinType, compareNullsEqual,
       buildSide, buildKeys)
@@ -2566,6 +2572,25 @@ trait GpuHashJoin extends GpuJoinExec {
 
     val spillableBuiltBatch = withResource(nullFiltered) {
       LazySpillableColumnarBatch(_, "built")
+    }
+
+    lazy val buildStatsOpt = broadcastBatch.flatMap { batch =>
+      joinType match {
+        case _: InnerLike | LeftOuter | RightOuter | FullOuter =>
+          Some(batch.getOrCreateBuildSideStats(
+            boundBuildKeys,
+            compareNullsEqual,
+            filterOutNull) {
+            spillableBuiltBatch.checkpoint()
+            withRetryNoSplit {
+              withRestoreOnRetry(spillableBuiltBatch) {
+                JoinBuildSideStats.fromBatch(spillableBuiltBatch.getBatch, boundBuildKeys)
+              }
+            }
+          })
+        case _ =>
+          None
+      }
     }
 
     val lazyStream = stream.map { cb =>
@@ -2597,7 +2622,7 @@ trait GpuHashJoin extends GpuJoinExec {
         val lazyCond = boundConditionLeftRight.map { cond =>
           LazyCompiledCondition(cond, left.output.size, right.output.size)
         }
-        new HashOuterJoinIterator(joinType, spillableBuiltBatch, boundBuildKeys, None, None,
+        new HashOuterJoinIterator(joinType, spillableBuiltBatch, boundBuildKeys, buildStatsOpt, None,
           lazyStream, boundStreamKeys, streamedPlan.output,
           lazyCond, joinOptions, buildSide,
           compareNullsEqual, condition, opTime, joinTime)
@@ -2609,12 +2634,12 @@ trait GpuHashJoin extends GpuJoinExec {
             boundConditionLeftRight.get,
             left.output.size,
             right.output.size)
-          new ConditionalHashJoinIterator(spillableBuiltBatch, boundBuildKeys, None,
+          new ConditionalHashJoinIterator(spillableBuiltBatch, boundBuildKeys, buildStatsOpt,
             lazyStream, boundStreamKeys, streamedPlan.output, lazyCond,
             joinOptions, joinType, buildSide,
             compareNullsEqual, condition, opTime, joinTime)
         } else {
-          new HashJoinIterator(spillableBuiltBatch, boundBuildKeys, None,
+          new HashJoinIterator(spillableBuiltBatch, boundBuildKeys, buildStatsOpt,
             lazyStream, boundStreamKeys, streamedPlan.output, joinOptions,
             joinType, buildSide, compareNullsEqual, condition, opTime, joinTime)
         }
