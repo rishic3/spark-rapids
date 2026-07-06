@@ -18,18 +18,20 @@ package com.nvidia.spark.rapids
 
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{ColumnVector, DType, OrderByArg, Scalar, Table}
+import ai.rapids.cudf.{ColumnVector, DType, OrderByArg, OutOfBoundsPolicy, Scalar, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuOverrides.extractLit
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingArray
-import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, withRetry}
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows,
+  withRestoreOnRetry, withRetry}
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.jni.GpuSplitAndRetryOOM
-import com.nvidia.spark.rapids.shims.{ShimExpression, ShimUnaryExecNode}
+import com.nvidia.spark.rapids.shims.{ShimExpression, ShimPredicateHelper, ShimUnaryExecNode}
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeSet, Expression, Generator, ReplicateRows, Stack}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, AttributeSet,
+  Expression, Generator, ReplicateRows, Stack}
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.{GenerateExec, SparkPlan}
 import org.apache.spark.sql.rapids.GpuCreateArray
@@ -913,6 +915,235 @@ case class GpuGenerateExec(
       othersProjectList.length, outer, batchTargetSize, opTime)
     new GpuGenerateIterator(splits, generator, othersProjectList.length, outer,
       numOutputRows, numOutputBatches, opTime)
+  }
+}
+
+/**
+ * Fuses a selective filter with an array explode so wide parent columns are gathered only for
+ * generated rows that survive the filter.
+ *
+ * This intentionally supports a small initial scope. See [[canFuse]] for the eligibility checks.
+ */
+case class GpuGenerateFilterExec(
+    condition: Expression,
+    generator: GpuExplodeBase,
+    requiredChildOutput: Seq[Attribute],
+    generatorOutput: Seq[Attribute],
+    child: SparkPlan) extends ShimUnaryExecNode with ShimPredicateHelper with GpuExec {
+
+  import GpuMetric._
+
+  private val parentRowIdAttr =
+    AttributeReference("_gpu_generate_parent_row_id", IntegerType, nullable = false)()
+  private val predicateParentOutput = requiredChildOutput.filter(condition.references.contains)
+  private val lateParentOutput = requiredChildOutput.filterNot(condition.references.contains)
+  private val predicateInput = parentRowIdAttr +: (generatorOutput ++ predicateParentOutput)
+  private val unfusedOutput = requiredChildOutput ++ generatorOutput
+
+  override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
+    OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY))
+
+  // Match the nullability refinement performed by GpuFilterExec.
+  private val (notNullPreds, _) = splitConjunctivePredicates(condition).partition {
+    case GpuIsNotNull(a) =>
+      isNullIntolerant(a) && a.references.subsetOf(AttributeSet(unfusedOutput))
+    case _ => false
+  }
+  private val notNullAttributes = notNullPreds.flatMap(_.references).distinct.map(_.exprId)
+
+  override def output: Seq[Attribute] = unfusedOutput.map { attr =>
+    if (attr.nullable && notNullAttributes.contains(attr.exprId)) {
+      attr.withNullability(false)
+    } else {
+      attr
+    }
+  }
+
+  override def producedAttributes: AttributeSet = AttributeSet(generatorOutput)
+
+  override def outputPartitioning: Partitioning = child.outputPartitioning
+
+  override protected def doCanonicalize(): SparkPlan = {
+    GpuFilterExec(
+      condition,
+      GpuGenerateExec(generator, requiredChildOutput, outer = false, generatorOutput, child))()
+        .canonicalized
+  }
+
+  override def coalesceAfter: Boolean = true
+
+  override protected val outputRowsLevel: MetricsLevel = ESSENTIAL_LEVEL
+  override protected val outputBatchesLevel: MetricsLevel = MODERATE_LEVEL
+
+  override def doExecute(): RDD[InternalRow] =
+    throw new IllegalStateException(s"Row-based execution should not occur for $this")
+
+  override def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
+    val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
+    val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
+    val opTime = gpuLongMetric(OP_TIME_LEGACY)
+    val cbTargetSize = new RapidsConf(conf).gpuTargetBatchSizeBytes
+    val boundGeneratorInput =
+      GpuBindReferences.bindGpuReferences(generator.children, child.output, allMetrics)
+    val boundParentOutput =
+      GpuBindReferences.bindGpuReferences(requiredChildOutput, child.output, allMetrics)
+    val boundCondition = GpuBindReferences.bindGpuReferencesTiered(
+      Seq(condition), predicateInput, conf, allMetrics)
+
+    child.executeColumnar().mapPartitionsWithIndex { (partIndex, iter) =>
+      GpuNondeterministic.initializeAll(boundCondition.exprTiers.flatten, partIndex)
+      iter.flatMap { input =>
+        generateFilterAndClose(input, boundParentOutput, boundGeneratorInput, boundCondition,
+          cbTargetSize, numOutputRows, numOutputBatches, opTime)
+      }
+    }
+  }
+
+  private def generateFilterAndClose(
+      input: ColumnarBatch,
+      boundParentOutput: Seq[GpuExpression],
+      boundGeneratorInput: Seq[GpuExpression],
+      boundCondition: GpuTieredProject,
+      batchTargetSize: Long,
+      numOutputRows: GpuMetric,
+      numOutputBatches: GpuMetric,
+      opTime: GpuMetric): Iterator[ColumnarBatch] = {
+    val projectedInput = NvtxIdWithMetrics(NvtxRegistry.GPU_GENERATE_PROJECT_SPLIT, opTime) {
+      GpuProjectExec.projectAndCloseWithRetrySingleBatch(
+        SpillableColumnarBatch(input, SpillPriorities.ACTIVE_ON_DECK_PRIORITY),
+        boundParentOutput ++ boundGeneratorInput)
+    }
+    val splitGroups = GpuGenerateUtils.getSplitsWithRetryAndClose(projectedInput, generator,
+      requiredChildOutput.length, outer = false, batchTargetSize, opTime)
+
+    splitGroups.flatMap { splits =>
+      boundCondition.retryables.foreach(_.checkpoint())
+      val output = withRetry(safeIteratorFromSeq(splits.toSeq), splitSpillableInHalfByRows) {
+        attempt =>
+          withResource(attempt.getColumnarBatch()) { parentBatch =>
+            withRestoreOnRetry(boundCondition.retryables) {
+              NvtxIdWithMetrics(NvtxRegistry.GPU_GENERATE_ITERATOR, opTime) {
+                generateFilterBatch(parentBatch, boundCondition)
+              }
+            }
+          }
+      }
+      output.map { batch =>
+        numOutputBatches += 1
+        numOutputRows += batch.numRows()
+        batch
+      }
+    }
+  }
+
+  private def generateFilterBatch(
+      parentBatch: ColumnarBatch,
+      boundCondition: GpuTieredProject): ColumnarBatch = {
+    withResource(explodeNarrow(parentBatch)) { narrowBatch =>
+      val parentIds = narrowBatch.column(0).asInstanceOf[GpuColumnVector].getBase
+      withResource(gatherParentColumns(parentBatch, parentIds, predicateParentOutput)) {
+        predicateParents =>
+          withResource(GpuColumnVector.combineColumns(narrowBatch, predicateParents)) {
+            predicateBatch =>
+              withResource(GpuFilter(predicateBatch, boundCondition)) { filteredBatch =>
+                val filteredParentIds =
+                  filteredBatch.column(0).asInstanceOf[GpuColumnVector].getBase
+                withResource(
+                    gatherParentColumns(parentBatch, filteredParentIds, lateParentOutput)) {
+                    lateParents => assembleOutput(filteredBatch, lateParents)
+                }
+              }
+          }
+      }
+    }
+  }
+
+  private def explodeNarrow(parentBatch: ColumnarBatch): ColumnarBatch = {
+    val generatorInput = parentBatch.column(requiredChildOutput.length)
+        .asInstanceOf[GpuColumnVector].getBase
+    withResource(Scalar.fromInt(0)) { zero =>
+      withResource(ColumnVector.sequence(zero, parentBatch.numRows())) { parentIds =>
+        withResource(new Table(parentIds, generatorInput)) { narrowInput =>
+          val exploded = if (generator.position) {
+            narrowInput.explodePosition(1)
+          } else {
+            narrowInput.explode(1)
+          }
+          withResource(exploded) { _ =>
+            val schema = (IntegerType +: generatorOutput.map(_.dataType)).toArray
+            GpuColumnVector.from(exploded, schema)
+          }
+        }
+      }
+    }
+  }
+
+  private def gatherParentColumns(
+      parentBatch: ColumnarBatch,
+      parentIds: ColumnVector,
+      attributes: Seq[Attribute]): ColumnarBatch = {
+    if (attributes.isEmpty) {
+      new ColumnarBatch(
+        Array.empty[org.apache.spark.sql.vectorized.ColumnVector], parentIds.getRowCount.toInt)
+    } else {
+      val parentColumns = attributes.map { attr =>
+        val index = requiredChildOutput.indexWhere(_.exprId == attr.exprId)
+        require(index >= 0, s"Unable to find parent attribute ${attr.sql}")
+        parentBatch.column(index).asInstanceOf[GpuColumnVector].getBase
+      }
+      withResource(new Table(parentColumns: _*)) { parentTable =>
+        withResource(parentTable.gather(parentIds, OutOfBoundsPolicy.DONT_CHECK)) { gathered =>
+          GpuColumnVector.from(gathered, attributes.map(_.dataType).toArray)
+        }
+      }
+    }
+  }
+
+  private def assembleOutput(
+      filteredBatch: ColumnarBatch,
+      lateParents: ColumnarBatch): ColumnarBatch = {
+    val outputColumns = new Array[org.apache.spark.sql.vectorized.ColumnVector](output.length)
+    closeOnExcept(outputColumns) { _ =>
+      requiredChildOutput.zipWithIndex.foreach { case (attr, outputIndex) =>
+        val predicateIndex = predicateParentOutput.indexWhere(_.exprId == attr.exprId)
+        val source = if (predicateIndex >= 0) {
+          filteredBatch.column(1 + generatorOutput.length + predicateIndex)
+        } else {
+          val lateIndex = lateParentOutput.indexWhere(_.exprId == attr.exprId)
+          require(lateIndex >= 0, s"Unable to find late parent attribute ${attr.sql}")
+          lateParents.column(lateIndex)
+        }
+        outputColumns(outputIndex) = source.asInstanceOf[GpuColumnVector].incRefCount()
+      }
+      generatorOutput.indices.foreach { generatorIndex =>
+        outputColumns(requiredChildOutput.length + generatorIndex) =
+          filteredBatch.column(1 + generatorIndex).asInstanceOf[GpuColumnVector].incRefCount()
+      }
+      new ColumnarBatch(outputColumns, filteredBatch.numRows())
+    }
+  }
+}
+
+object GpuGenerateFilterExec {
+  def canFuse(condition: Expression, generate: GpuGenerateExec): Boolean = {
+    !generate.outer &&
+      condition.deterministic &&
+      generate.requiredChildOutput.exists(attr => !condition.references.contains(attr)) &&
+      generate.generator.fixedLenLazyExpressions.isEmpty &&
+      (generate.generator match {
+        case explode: GpuExplodeBase => explode.child.dataType.isInstanceOf[ArrayType]
+        case _ => false
+      })
+  }
+
+  def apply(condition: Expression, generate: GpuGenerateExec): GpuGenerateFilterExec = {
+    require(canFuse(condition, generate), "Generate/Filter pair is not eligible for fusion")
+    GpuGenerateFilterExec(
+      condition,
+      generate.generator.asInstanceOf[GpuExplodeBase],
+      generate.requiredChildOutput,
+      generate.generatorOutput,
+      generate.child)
   }
 }
 

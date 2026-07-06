@@ -1326,8 +1326,13 @@ case class GpuFilterExecMeta(
   rule: DataFromReplacementRule
 ) extends SparkPlanMeta[FilterExec](filter, conf, parentMetaOpt, rule) {
   override def convertToGpu(): GpuExec = {
-    GpuFilterExec(childExprs.head.convertToGpu(),
-      childPlans.head.convertIfNeeded())()
+    val condition = childExprs.head.convertToGpu()
+    childPlans.head.convertIfNeeded() match {
+      case generate: GpuGenerateExec if GpuGenerateFilterExec.canFuse(condition, generate) =>
+        GpuGenerateFilterExec(condition, generate)
+      case child =>
+        GpuFilterExec(condition, child)()
+    }
   }
 }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,17 @@ package com.nvidia.spark.rapids
 import org.apache.spark.sql.functions.map_concat
 
 class CollectionOpSuite extends SparkQueryCompareTestSuite {
+  testSparkResultsAreEqual(
+    "fuse selective filter with posexplode",
+    spark => spark.range(0, 16).selectExpr(
+      "id",
+      "concat('payload-', cast(id as string)) as payload",
+      "array(cast(id as int), cast(id + 1 as int), cast(id + 2 as int)) as items"),
+    existClasses = "GpuGenerateFilterExec") { df =>
+    df.selectExpr("id", "payload", "posexplode(items) as (pos, item)")
+      .filter("item % 2 = 0")
+  }
+
   testSparkResultsAreEqual(
     "MapConcat with Array keys",
     ArrayKeyMapDF) {
